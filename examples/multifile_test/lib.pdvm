@@ -1,0 +1,36 @@
+label square
+dup
+mul
+ret
+
+label cube
+dup
+dup
+mul
+mul
+ret
+
+label emit_slice
+rot
+over
+sub
+swap
+rot
+sub
+swap
+call _emit_slice_rstrip
+prints
+ret
+
+label _emit_slice_rstrip
+dup
+jz _emit_slice_rstrip_done
+rot
+pop
+push 1
+sub
+jmp _emit_slice_rstrip
+
+label _emit_slice_rstrip_done
+pop
+ret

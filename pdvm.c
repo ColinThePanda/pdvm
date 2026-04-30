@@ -45,6 +45,13 @@ typedef struct
     size_t capacity;
 } CallStack;
 
+typedef struct
+{
+    size_t *items;
+    size_t capacity;
+    size_t count;
+} Includes;
+
 bool memory_ensure(Memory *memory, NUM addr)
 {
     if (addr < 0)
@@ -890,6 +897,11 @@ int exec_program(Vm *vm, String_View program)
     }
 
     size_t ip = 0;
+    if (!label_lookup(labels, sv_from_cstr("_main"), &ip))
+    {
+        printf("Missing entry point: label _main\n");
+        return 1;
+    }
 
     while (ip < lines.count)
     {
@@ -1127,6 +1139,158 @@ int exec_program(Vm *vm, String_View program)
     return 0;
 }
 
+bool path_is_absolute_sv(String_View path)
+{
+    if (path.count == 0)
+        return false;
+
+    if (path.data[0] == '/' || path.data[0] == '\\')
+        return true;
+
+#ifdef _WIN32
+    if (path.count >= 3 &&
+        isalpha((unsigned char)path.data[0]) &&
+        path.data[1] == ':' &&
+        (path.data[2] == '/' || path.data[2] == '\\'))
+    {
+        return true;
+    }
+#endif
+
+    return false;
+}
+
+void make_include_path(const char *source_filepath, String_View include_name, String_Builder *out)
+{
+    if (path_is_absolute_sv(include_name))
+    {
+        sb_append_sv(out, include_name);
+        sb_append_null(out);
+        return;
+    }
+
+    const char *dir = temp_dir_name(source_filepath);
+
+    if (dir == NULL || dir[0] == '\0')
+    {
+        dir = ".";
+    }
+
+    sb_append_cstr(out, dir);
+
+    if (out->count > 0 &&
+        out->items[out->count - 1] != '/' &&
+        out->items[out->count - 1] != '\\')
+    {
+        da_append(out, '/');
+    }
+
+    sb_append_sv(out, include_name);
+    sb_append_null(out);
+}
+
+bool preprocess_file(const char *filepath, String_Builder *out)
+{
+    String_Builder file = {0};
+
+    if (!read_entire_file(filepath, &file))
+    {
+        printf("Failed to read file: %s\n", filepath);
+        return false;
+    }
+
+    String_View program = sb_to_sv(file);
+    Lines lines = {0};
+    Includes includes = {0};
+
+    while (program.count > 0)
+    {
+        String_View line = sv_chop_by_delim(&program, '\n');
+
+        line = sv_trim(line);
+
+        if (line.count == 0)
+            continue;
+        if (line.data[0] == '#')
+            continue;
+
+        da_append(&lines, line);
+    }
+
+    for (size_t i = 0; i < lines.count; i++)
+    {
+        String_View line = lines.items[i];
+        String_View rest = line;
+
+        String_View command = sv_chop_by_delim(&rest, ' ');
+        command = sv_trim(command);
+        rest = sv_trim(rest);
+
+        if (sv_eq_ignore_case(command, "include"))
+        {
+            if (rest.count == 0)
+            {
+                printf("include requires a file\n");
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                return false;
+            }
+
+            da_append(&includes, i);
+        }
+    }
+
+    for (size_t i = 0; i < lines.count; i++)
+    {
+        bool is_include = false;
+
+        for (size_t j = 0; j < includes.count; j++)
+        {
+            if (includes.items[j] == i)
+            {
+                is_include = true;
+                break;
+            }
+        }
+
+        if (is_include)
+        {
+            String_View line = lines.items[i];
+            String_View rest = line;
+
+            String_View command = sv_chop_by_delim(&rest, ' ');
+            command = sv_trim(command);
+            rest = sv_trim(rest);
+
+            String_Builder include_path = {0};
+            make_include_path(filepath, rest, &include_path);
+
+            if (!preprocess_file(include_path.items, out))
+            {
+                sb_free(include_path);
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                return false;
+            }
+
+            sb_free(include_path);
+        }
+        else
+        {
+            sb_append_sv(out, lines.items[i]);
+            da_append(out, '\n');
+        }
+    }
+
+    sb_free(file);
+    da_free(lines);
+    da_free(includes);
+
+    return true;
+}
+
 int console(Vm *vm)
 {
     Memory memory = {0};
@@ -1144,18 +1308,17 @@ int console(Vm *vm)
 
 int exec_file(Vm *vm, char *filepath)
 {
-    String_Builder file = {0};
-    if (!read_entire_file(filepath, &file))
+    String_Builder expanded = {0};
+
+    if (!preprocess_file(filepath, &expanded))
     {
-        printf("Failed to read file\n");
+        printf("Failed to preprocess file\n");
         return 1;
     }
 
-    String_View file_content = sb_to_sv(file);
+    int result = exec_program(vm, sb_to_sv(expanded));
 
-    int result = exec_program(vm, file_content);
-
-    sb_free(file);
+    sb_free(expanded);
     return result;
 }
 

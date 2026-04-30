@@ -1,0 +1,7 @@
+include lib.pdvm
+
+label _main
+pushs hello world
+push 2
+push 8
+call emit_slice
