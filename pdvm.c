@@ -6,6 +6,44 @@
 #define NUM int64_t
 #define NUM_FMT "%lli"
 
+bool parse_num(const char *input, NUM *out)
+{
+    return sscanf(input, NUM_FMT, out) == 1;
+}
+
+typedef struct
+{
+    String_View *items;
+    size_t capacity;
+    size_t count;
+} Lines;
+
+typedef struct
+{
+    String_View name;
+    size_t ip;
+} Label;
+
+typedef struct
+{
+    Label *items;
+    size_t capacity;
+    size_t count;
+} Labels;
+
+bool label_lookup(Labels labels, String_View name, size_t *ip)
+{
+    for (size_t i = 0; i < labels.count; i++)
+    {
+        if (sv_eq(labels.items[i].name, name))
+        {
+            *ip = labels.items[i].ip;
+            return true;
+        }
+    }
+
+    return false;
+}
 typedef struct
 {
     NUM *items;
@@ -44,7 +82,7 @@ void vm_div(Vm *vm)
 {
     NUM num1 = vm_pop(vm);
     NUM num2 = vm_pop(vm);
-    vm_push(vm, num2 - num1);
+    vm_push(vm, num2 / num1);
 }
 
 void vm_mod(Vm *vm)
@@ -165,6 +203,59 @@ void vm_not(Vm *vm)
     vm_push(vm, vm_pop(vm) == 0);
 }
 
+void vm_over(Vm *vm)
+{
+    vm_push(vm, vm->items[vm->count - 2]);
+}
+
+void vm_input(Vm *vm)
+{
+    char input[INPUT_BUFFER_SIZE];
+
+    printf("input> ");
+
+    if (!fgets(input, sizeof(input), stdin))
+    {
+        printf("Failed to read input\n");
+        return;
+    }
+
+    NUM num;
+
+    if (!parse_num(input, &num))
+    {
+        printf("Input must be a number\n");
+        return;
+    }
+
+    vm_push(vm, num);
+}
+
+void vm_rot(Vm *vm)
+{
+    NUM c = vm_pop(vm);
+    NUM b = vm_pop(vm);
+    NUM a = vm_pop(vm);
+
+    vm_push(vm, b);
+    vm_push(vm, c);
+    vm_push(vm, a);
+}
+
+bool vm_jump(Labels labels, String_View label_name, size_t *ip)
+{
+    size_t target = 0;
+
+    if (!label_lookup(labels, label_name, &target))
+    {
+        printf("Unknown label: %.*s\n", (int)label_name.count, label_name.data);
+        return false;
+    }
+
+    *ip = target;
+    return true;
+}
+
 bool sv_eq_ignore_case(String_View a, const char *b)
 {
     size_t b_len = strlen(b);
@@ -209,7 +300,11 @@ int exec_line(Vm *vm, String_View line)
         }
 
         const char *num_str = temp_sv_to_cstr(line);
-        vm_push(vm, atoll(num_str));
+        NUM num;
+        if (!parse_num(num_str, &num)) {
+            return 1;
+        }
+        vm_push(vm, num);
     }
     else if (sv_eq_ignore_case(command, "pop"))
     {
@@ -419,6 +514,30 @@ int exec_line(Vm *vm, String_View line)
 
         vm_not(vm);
     }
+    else if (sv_eq_ignore_case(command, "over"))
+    {
+        if (vm->count < 2)
+        {
+            printf("There is less than 2 numbers on the stack\n");
+            return 1;
+        }
+
+        vm_over(vm);
+    }
+    else if (sv_eq_ignore_case(command, "input"))
+    {
+        vm_input(vm);
+    }
+    else if (sv_eq_ignore_case(command, "rot"))
+    {
+        if (vm->count < 3)
+        {
+            printf("There is less than 3 numbers on the stack\n");
+            return 1;
+        }
+
+        vm_rot(vm);
+    }
     else
     {
         printf("Command not found\n");
@@ -427,12 +546,221 @@ int exec_line(Vm *vm, String_View line)
     return 1;
 }
 
+int exec_program(Vm *vm, String_View program) {
+    Lines lines = {0};
+    Labels labels = {0};
+
+    while (program.count > 0) {
+        String_View line = sv_chop_by_delim(&program, '\n');
+
+        line = sv_trim(line);
+
+        if (line.count == 0) continue;
+        if (line.data[0] == '#') continue;
+
+        da_append(&lines, line);
+    }
+
+    for (size_t i = 0; i < lines.count; i++)
+    {
+        String_View line = lines.items[i];
+        String_View rest = line;
+
+        String_View command = sv_chop_by_delim(&rest, ' ');
+        command = sv_trim(command);
+        rest = sv_trim(rest);
+
+        if (sv_eq_ignore_case(command, "label"))
+        {
+            if (rest.count == 0)
+            {
+                printf("label requires a name\n");
+                return 1;
+            }
+
+            Label label = {rest, i + 1};
+
+            da_append(&labels, label);
+        }
+    }
+
+    size_t ip = 0;
+
+    while (ip < lines.count) {
+        String_View line = lines.items[ip];
+        String_View rest = line;
+
+        String_View command = sv_chop_by_delim(&rest, ' ');
+        command = sv_trim(command);
+        rest = sv_trim(rest);
+
+        if (sv_eq_ignore_case(command, "label")) {
+            ip++;
+        } else if (sv_eq_ignore_case(command, "jmp")) {
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jz")) {
+            if (vm_pop(vm) != 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jnz")) {
+            if (vm_pop(vm) == 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jneg")) {
+            if (vm_pop(vm) >= 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jpos")) {
+            if (vm_pop(vm) <= 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jlez")) {
+            if (vm_pop(vm) > 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jgez")) {
+            if (vm_pop(vm) < 0) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "je")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a != b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jne")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a == b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jl")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a < b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jg")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a > b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jle")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a <= b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else if (sv_eq_ignore_case(command, "jge")) {
+            if (vm->count < 2) {
+                printf("Must have 2 numbers on the stack");
+                continue;
+            }
+
+            NUM a = vm_pop(vm);
+            NUM b = vm_pop(vm);
+
+            if (!(a >= b)) {
+                ip++;
+                continue;
+            }
+            
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        } else {
+            if (exec_line(vm, line) == 2)
+                break;
+
+            ip++;
+        }
+    }
+
+
+    return 0;
+}
+
 int console(Vm *vm)
 {
     for (;;)
     {
         char input[INPUT_BUFFER_SIZE];
-        printf("vm> ");
+        printf("pdvm> ");
         if (!fgets(input, sizeof(input), stdin))
             break;
         if (exec_line(vm, sv_from_cstr(input)) == 2)
@@ -448,20 +776,12 @@ int exec_file(Vm *vm, char *filepath) {
         return 1;
     }
 
-    String_View content = sb_to_sv(file);
+    String_View file_content = sb_to_sv(file);
 
-    while (content.count > 0) {
-        String_View line = sv_chop_by_delim(&content, '\n');
-
-        line = sv_trim(line);
-
-        if (line.count == 0) continue;
-        if (line.data[0] == '#') continue;
-        if (exec_line(vm, line) == 2) break;
-    }
+    int result = exec_program(vm, file_content);
 
     sb_free(file);
-    return 0;
+    return result;
 }
 
 int main(int argc, char *argv[])

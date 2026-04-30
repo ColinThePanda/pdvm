@@ -1,0 +1,51 @@
+push 0
+push 1
+push 49 # 50th fibbonacci number
+
+label loop
+
+# If counter == 0, finish.
+dup
+jz done
+
+# Decrease counter first.
+push 1
+sub
+
+# Stack:
+# [a, b, counter - 1]
+
+# Move counter underneath the pair temporarily:
+# [a, b, c]
+rot
+# [b, c, a]
+rot
+# [c, a, b]
+
+# Now top pair is [a, b], with counter below:
+# [c, a, b]
+
+# Compute next Fibonacci pair:
+# [c, a, b] -> [c, b, a + b]
+swap
+over
+add
+
+# Stack:
+# [c, b, a + b]
+
+# Move counter back to top:
+rot
+# [b, a + b, c]
+
+jmp loop
+
+label done
+
+# Stack:
+# [F(49), F(50), 0]
+
+pop
+# [F(49), F(50)]
+
+print
