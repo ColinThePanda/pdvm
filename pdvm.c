@@ -81,6 +81,18 @@ void vm_push(Vm *vm, NUM num)
     da_append(vm, num);
 }
 
+void vm_pushs(Vm *vm, const char *str)
+{
+    size_t len = strlen(str);
+
+    for (size_t i = 0; i < len; i++)
+    {
+        vm_push(vm, (NUM)str[i]);
+    }
+
+    vm_push(vm, (NUM)len);
+}
+
 NUM vm_pop(Vm *vm)
 {
     return da_pop(vm);
@@ -295,6 +307,24 @@ void vm_printc(Vm *vm)
     printf("%c", (char)da_last(vm));
 }
 
+void vm_prints(Vm *vm)
+{
+    NUM str_len = vm_pop(vm);
+
+    if (str_len < 0 || (size_t)str_len > vm->count)
+    {
+        printf("Invalid string length\n");
+        return;
+    }
+
+    size_t start = vm->count - (size_t)str_len;
+
+    for (size_t i = start; i < vm->count; i++)
+    {
+        printf("%c", (char)vm->items[i]);
+    }
+}
+
 bool vm_jump(Labels labels, String_View label_name, size_t *ip)
 {
     size_t target = 0;
@@ -361,6 +391,17 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
             return 1;
         }
         vm_push(vm, num);
+    }
+    else if (sv_eq_ignore_case(command, "pushs"))
+    {
+        if (line.count == 0)
+        {
+            printf("push requires a number\n");
+            return 1;
+        }
+
+        const char *str = temp_sv_to_cstr(line);
+        vm_pushs(vm, str);
     }
     else if (sv_eq_ignore_case(command, "pop"))
     {
@@ -629,6 +670,18 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
         }
 
         vm_printc(vm);
+        if (console)
+            printf("\n");
+    }
+    else if (sv_eq_ignore_case(command, "prints"))
+    {
+        if (vm->count == 0)
+        {
+            printf("Stack is empty\n");
+            return 1;
+        }
+
+        vm_prints(vm);
         if (console)
             printf("\n");
     }
