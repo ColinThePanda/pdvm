@@ -1,29 +1,22 @@
-push 0
-push 1
 input
 push 1
-sub
+swap
 
 label loop
+push 1
+over
+jle done
 
 dup
-jz done
-
+rot
+mul
+swap
 push 1
 sub
-
-rot
-rot
-
-swap
-over
-add
-
-rot
 
 jmp loop
 
 label done
-
 pop
 print
+halt
