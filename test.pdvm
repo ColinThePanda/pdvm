@@ -1,0 +1,29 @@
+jmp main
+
+label square
+dup
+mul
+ret
+
+label cube
+dup
+dup
+mul
+mul
+ret
+
+label main
+input
+dup
+call square
+print
+pop
+
+push 10
+printc
+pop
+
+call cube
+print
+
+halt

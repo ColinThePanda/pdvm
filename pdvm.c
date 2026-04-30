@@ -38,6 +38,13 @@ typedef struct
     size_t capacity;
 } Memory;
 
+typedef struct
+{
+    NUM *items;
+    size_t count;
+    size_t capacity;
+} CallStack;
+
 bool memory_ensure(Memory *memory, NUM addr)
 {
     if (addr < 0)
@@ -321,8 +328,77 @@ void vm_prints(Vm *vm)
 
     for (size_t i = start; i < vm->count; i++)
     {
-        printf("%c", (char)vm->items[i]);
+        fputc((unsigned char)vm->items[i], stdout);
     }
+}
+
+void vm_emit(Vm *vm)
+{
+    NUM num = vm_pop(vm);
+    printf(NUM_FMT, num);
+}
+
+void vm_emitc(Vm *vm)
+{
+    NUM num = vm_pop(vm);
+    printf("%c", (char)num);
+}
+
+bool vm_emits(Vm *vm)
+{
+    NUM str_len = vm_pop(vm);
+
+    if (str_len < 0 || (size_t)str_len > vm->count)
+    {
+        printf("Invalid string length\n");
+        return false;
+    }
+
+    size_t len = (size_t)str_len;
+    size_t start = vm->count - len;
+
+    for (size_t i = start; i < vm->count; i++)
+    {
+        fputc((unsigned char)vm->items[i], stdout);
+    }
+
+    vm->count = start;
+    return true;
+}
+
+void vm_dup2(Vm *vm)
+{
+    NUM num2 = vm->items[vm->count - 1];
+    NUM num1 = vm->items[vm->count - 2];
+    vm_push(vm, num1);
+    vm_push(vm, num2);
+}
+
+void vm_nip(Vm *vm)
+{
+    NUM top = vm_pop(vm);
+    vm_pop(vm);
+    vm_push(vm, top);
+}
+
+void vm_tuck(Vm *vm)
+{
+    NUM b = vm_pop(vm);
+    NUM a = vm_pop(vm);
+
+    vm_push(vm, b);
+    vm_push(vm, a);
+    vm_push(vm, b);
+}
+
+void vm_depth(Vm *vm)
+{
+    vm_push(vm, (NUM)vm->count);
+}
+
+void vm_nl()
+{
+    fputc('\n', stdout);
 }
 
 bool vm_jump(Labels labels, String_View label_name, size_t *ip)
@@ -403,7 +479,7 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
         const char *str = temp_sv_to_cstr(line);
         vm_pushs(vm, str);
     }
-    else if (sv_eq_ignore_case(command, "pop"))
+    else if (sv_eq_ignore_case(command, "pop") || sv_eq_ignore_case(command, "drop"))
     {
         if (vm->count == 0)
         {
@@ -685,6 +761,82 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
         if (console)
             printf("\n");
     }
+    else if (sv_eq_ignore_case(command, "emit"))
+    {
+        if (vm->count == 0)
+        {
+            printf("Stack is empty\n");
+            return 1;
+        }
+
+        vm_emit(vm);
+        if (console)
+            printf("\n");
+    }
+    else if (sv_eq_ignore_case(command, "emitc"))
+    {
+        if (vm->count == 0)
+        {
+            printf("Stack is empty\n");
+            return 1;
+        }
+
+        vm_emitc(vm);
+        if (console)
+            printf("\n");
+    }
+    else if (sv_eq_ignore_case(command, "emits"))
+    {
+        if (vm->count == 0)
+        {
+            printf("Stack is empty\n");
+            return 1;
+        }
+
+        if (!vm_emits(vm))
+            return 1;
+
+        if (console)
+            printf("\n");
+    }
+    else if (sv_eq_ignore_case(command, "dup2"))
+    {
+        if (vm->count < 2)
+        {
+            printf("There is less than 2 numbers on the stack\n");
+            return 1;
+        }
+
+        vm_dup2(vm);
+    }
+    else if (sv_eq_ignore_case(command, "nip"))
+    {
+        if (vm->count < 2)
+        {
+            printf("There is less than 2 numbers on the stack\n");
+            return 1;
+        }
+
+        vm_nip(vm);
+    }
+    else if (sv_eq_ignore_case(command, "tuck"))
+    {
+        if (vm->count < 2)
+        {
+            printf("There is less than 2 numbers on the stack\n");
+            return 1;
+        }
+
+        vm_tuck(vm);
+    }
+    else if (sv_eq_ignore_case(command, "depth"))
+    {
+        vm_depth(vm);
+    }
+    else if (sv_eq_ignore_case(command, "nl"))
+    {
+        vm_nl();
+    }
     else
     {
         printf("Command not found\n");
@@ -698,6 +850,7 @@ int exec_program(Vm *vm, String_View program)
     Lines lines = {0};
     Labels labels = {0};
     Memory memory = {0};
+    CallStack call_stack = {0};
 
     while (program.count > 0)
     {
@@ -942,6 +1095,23 @@ int exec_program(Vm *vm, String_View program)
             if (!vm_jump(labels, rest, &ip))
                 return 1;
         }
+        else if (sv_eq_ignore_case(command, "call"))
+        {
+            da_append(&call_stack, ip + 1);
+
+            if (!vm_jump(labels, rest, &ip))
+                return 1;
+        }
+        else if (sv_eq_ignore_case(command, "ret"))
+        {
+            if (call_stack.count == 0)
+            {
+                printf("Call stack is empty\n");
+                return 1;
+            }
+
+            ip = da_pop(&call_stack);
+        }
         else
         {
             if (exec_line(vm, &memory, false, line) == 2)
@@ -952,6 +1122,7 @@ int exec_program(Vm *vm, String_View program)
     }
 
     da_free(memory);
+    da_free(call_stack);
 
     return 0;
 }
