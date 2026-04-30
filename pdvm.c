@@ -52,6 +52,41 @@ typedef struct
     size_t count;
 } Includes;
 
+typedef struct
+{
+    String_View name;
+    NUM value;
+} Const;
+
+typedef struct
+{
+    Const *items;
+    size_t capacity;
+    size_t count;
+} Consts;
+
+typedef struct
+{
+    size_t *items;
+    size_t capacity;
+    size_t count;
+} ConstLineNums;
+
+String_View sv_dup_owned(String_View sv)
+{
+    char *data = malloc(sv.count);
+
+    if (data == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    memcpy(data, sv.data, sv.count);
+
+    return sv_from_parts(data, sv.count);
+}
+
 bool memory_ensure(Memory *memory, NUM addr)
 {
     if (addr < 0)
@@ -422,6 +457,50 @@ bool vm_jump(Labels labels, String_View label_name, size_t *ip)
     return true;
 }
 
+
+bool const_lookup(Consts *consts, String_View name, NUM *value)
+{
+    for (size_t i = 0; i < consts->count; i++)
+    {
+        if (sv_eq(consts->items[i].name, name))
+        {
+            *value = consts->items[i].value;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool const_define(Consts *consts, String_View name, NUM value)
+{
+    NUM existing_value;
+
+    if (const_lookup(consts, name, &existing_value))
+    {
+        printf("Constant already exists: %.*s\n", (int)name.count, name.data);
+        return false;
+    }
+
+    Const constant = {
+        .name = sv_dup_owned(name),
+        .value = value,
+    };
+
+    da_append(consts, constant);
+    return true;
+}
+
+void consts_free(Consts consts)
+{
+    for (size_t i = 0; i < consts.count; i++)
+    {
+        free((void *)consts.items[i].name.data);
+    }
+
+    da_free(consts);
+}
+
 bool sv_eq_ignore_case(String_View a, const char *b)
 {
     size_t b_len = strlen(b);
@@ -441,7 +520,7 @@ bool sv_eq_ignore_case(String_View a, const char *b)
     return true;
 }
 
-int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
+int exec_line(Vm *vm, Memory *memory, Consts *consts, bool console, String_View line)
 {
     line = sv_trim(line);
 
@@ -463,17 +542,26 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
     {
         if (line.count == 0)
         {
-            printf("push requires a number\n");
+            printf("push requires a number or constant\n");
             return 1;
         }
 
         const char *num_str = temp_sv_to_cstr(line);
         NUM num;
-        if (!parse_num(num_str, &num))
+
+        if (parse_num(num_str, &num))
         {
+            vm_push(vm, num);
+        }
+        else if (const_lookup(consts, line, &num))
+        {
+            vm_push(vm, num);
+        }
+        else
+        {
+            printf("Invalid number or unknown constant: %.*s\n", (int)line.count, line.data);
             return 1;
         }
-        vm_push(vm, num);
     }
     else if (sv_eq_ignore_case(command, "pushs"))
     {
@@ -485,6 +573,28 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
 
         const char *str = temp_sv_to_cstr(line);
         vm_pushs(vm, str);
+    }
+    else if (console && sv_eq_ignore_case(command, "const"))
+    {
+        String_View name = sv_chop_by_delim(&line, ' ');
+        name = sv_trim(name);
+        line = sv_trim(line);
+        NUM num;
+
+        if (name.count == 0 || line.count == 0)
+        {
+            printf("const requires a name and value\n");
+            return 1;
+        }
+
+        if (!parse_num(temp_sv_to_cstr(line), &num))
+        {
+            printf("const value must be a number: %.*s\n", (int)line.count, line.data);
+            return 1;
+        }
+
+        if (!const_define(consts, name, num))
+            return 1;
     }
     else if (sv_eq_ignore_case(command, "pop") || sv_eq_ignore_case(command, "drop"))
     {
@@ -852,7 +962,7 @@ int exec_line(Vm *vm, Memory *memory, bool console, String_View line)
     return 1;
 }
 
-int exec_program(Vm *vm, String_View program)
+int exec_program(Vm *vm, String_View program, Consts *consts)
 {
     Lines lines = {0};
     Labels labels = {0};
@@ -1126,7 +1236,7 @@ int exec_program(Vm *vm, String_View program)
         }
         else
         {
-            if (exec_line(vm, &memory, false, line) == 2)
+            if (exec_line(vm, &memory, consts, false, line) == 2)
                 break;
 
             ip++;
@@ -1189,7 +1299,7 @@ void make_include_path(const char *source_filepath, String_View include_name, St
     sb_append_null(out);
 }
 
-bool preprocess_file(const char *filepath, String_Builder *out)
+bool preprocess_file(const char *filepath, String_Builder *out, Consts *consts)
 {
     String_Builder file = {0};
 
@@ -1202,6 +1312,7 @@ bool preprocess_file(const char *filepath, String_Builder *out)
     String_View program = sb_to_sv(file);
     Lines lines = {0};
     Includes includes = {0};
+    ConstLineNums const_line_nums = {0};
 
     while (program.count > 0)
     {
@@ -1234,15 +1345,71 @@ bool preprocess_file(const char *filepath, String_Builder *out)
                 sb_free(file);
                 da_free(lines);
                 da_free(includes);
+                da_free(const_line_nums);
                 return false;
             }
 
             da_append(&includes, i);
+        } else if (sv_eq_ignore_case(command, "const")) {
+            if (rest.count == 0)
+            {
+                printf("const requires a name and value\n");
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                da_free(const_line_nums);
+                return false;
+            }
+            String_View name = sv_chop_by_delim(&rest, ' ');
+            name = sv_trim(name);
+            rest = sv_trim(rest);
+            if (rest.count == 0)
+            {
+                printf("const requires a name and value\n");
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                da_free(const_line_nums);
+                return false;
+            }
+            NUM num;
+
+            if (!parse_num(temp_sv_to_cstr(rest), &num))
+            {
+                printf("const value must be a number: %.*s\n", (int)rest.count, rest.data);
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                da_free(const_line_nums);
+                return false;
+            }
+
+            if (!const_define(consts, name, num))
+            {
+                sb_free(file);
+                da_free(lines);
+                da_free(includes);
+                da_free(const_line_nums);
+                return false;
+            }
+            da_append(&const_line_nums, i);
         }
     }
 
     for (size_t i = 0; i < lines.count; i++)
     {
+        bool is_const = false;
+        for (size_t j = 0; j < const_line_nums.count; j++) {
+            if (const_line_nums.items[j] == i) {
+                is_const = true;
+                break;
+            }
+        }
+
+        if (is_const) {
+            continue;
+        }
+
         bool is_include = false;
 
         for (size_t j = 0; j < includes.count; j++)
@@ -1266,12 +1433,13 @@ bool preprocess_file(const char *filepath, String_Builder *out)
             String_Builder include_path = {0};
             make_include_path(filepath, rest, &include_path);
 
-            if (!preprocess_file(include_path.items, out))
+            if (!preprocess_file(include_path.items, out, consts))
             {
                 sb_free(include_path);
                 sb_free(file);
                 da_free(lines);
                 da_free(includes);
+                da_free(const_line_nums);
                 return false;
             }
 
@@ -1287,6 +1455,7 @@ bool preprocess_file(const char *filepath, String_Builder *out)
     sb_free(file);
     da_free(lines);
     da_free(includes);
+    da_free(const_line_nums);
 
     return true;
 }
@@ -1294,30 +1463,36 @@ bool preprocess_file(const char *filepath, String_Builder *out)
 int console(Vm *vm)
 {
     Memory memory = {0};
+    Consts consts = {0};
     for (;;)
     {
         char input[INPUT_BUFFER_SIZE];
         printf("pdvm> ");
         if (!fgets(input, sizeof(input), stdin))
             break;
-        if (exec_line(vm, &memory, true, sv_from_cstr(input)) == 2)
-            return 0;
+        if (exec_line(vm, &memory, &consts, true, sv_from_cstr(input)) == 2)
+            break;
     }
+
+    consts_free(consts);
+    da_free(memory);
     return 0;
 }
 
 int exec_file(Vm *vm, char *filepath)
 {
+    Consts consts = {0};
     String_Builder expanded = {0};
 
-    if (!preprocess_file(filepath, &expanded))
+    if (!preprocess_file(filepath, &expanded, &consts))
     {
         printf("Failed to preprocess file\n");
         return 1;
     }
 
-    int result = exec_program(vm, sb_to_sv(expanded));
+    int result = exec_program(vm, sb_to_sv(expanded), &consts);
 
+    consts_free(consts);
     sb_free(expanded);
     return result;
 }

@@ -1,0 +1,64 @@
+const NL 10
+const SPACE 32
+
+const PLUS 43
+const DASH 45
+const PIPE 124
+
+const WIDTH 17
+
+const LEFT_PAD 3
+const RIGHT_PAD 3
+
+label repeat_char
+dup
+jz repeat_char_done
+swap
+dup
+emitc
+swap
+push 1
+sub
+jmp repeat_char
+
+label repeat_char_done
+pop
+pop
+ret
+
+label border
+push PLUS
+emitc
+push DASH
+push WIDTH
+call repeat_char
+push PLUS
+emitc
+push NL
+emitc
+ret
+
+label _main
+call border
+
+push PIPE
+emitc
+
+push SPACE
+push LEFT_PAD
+call repeat_char
+
+pushs hello world
+emits
+
+push SPACE
+push RIGHT_PAD
+call repeat_char
+
+push PIPE
+emitc
+push NL
+emitc
+
+call border
+halt
