@@ -1,0 +1,20 @@
+struct Color u8 u8 u8 u8
+
+label get_input
+    emits
+    input
+    convert u8
+    ret
+
+label _main
+    pushs Enter red value: 
+    call get_input
+    pushs Enter blue value: 
+    call get_input
+    pushs Enter green value: 
+    call get_input
+    pushs Enter alpha value: 
+    call get_input
+
+    pack Color
+    dump

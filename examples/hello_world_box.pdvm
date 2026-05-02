@@ -1,6 +1,5 @@
 const NL 10
 const SPACE 32
-
 const PLUS 43
 const DASH 45
 const PIPE 124
@@ -61,4 +60,3 @@ push NL
 emitc
 
 call border
-halt

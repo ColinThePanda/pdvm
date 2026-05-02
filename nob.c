@@ -5,7 +5,7 @@
 #define FLAG_IMPLEMENTATION
 #include "flag.h"
 
-int main(int argc, char *argv[])
+int main(int argc, char **argv)
 {
     GO_REBUILD_URSELF(argc, argv);
 

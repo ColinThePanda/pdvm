@@ -1,10 +1,11 @@
+label _main
 input
 push 1
 swap
 
 label loop
+dup
 push 1
-over
 jle done
 
 dup
@@ -19,4 +20,3 @@ jmp loop
 label done
 pop
 print
-halt

@@ -1,0 +1,507 @@
+# Edit the pushs line in _main to run a different Brainfuck program.
+const GT 62
+const LT 60
+const PLUS 43
+const MINUS 45
+const DOT 46
+const COMMA 44
+const OPEN 91
+const CLOSE 93
+
+const IP_ADDR 900
+const DP_ADDR 901
+const PROGRAM_LEN_ADDR 902
+const STORE_ADDR 903
+const STORE_REMAINING_ADDR 904
+const SCAN_ADDR 905
+const SCAN_DEPTH_ADDR 906
+const INPUT_LEN_ADDR 907
+
+const PROGRAM_BASE 2000
+const INPUT_BASE 4000
+const DATA_BASE 10000
+const ZERO_CELLS 64
+
+label read_program_char
+push PROGRAM_BASE
+add
+read
+ret
+
+label inc_ip
+push IP_ADDR
+read
+push 1
+add
+push IP_ADDR
+write
+ret
+
+label store_program
+push PROGRAM_LEN_ADDR
+write
+
+push PROGRAM_LEN_ADDR
+read
+push STORE_REMAINING_ADDR
+write
+
+push PROGRAM_BASE
+push PROGRAM_LEN_ADDR
+read
+add
+push 1
+sub
+push STORE_ADDR
+write
+
+label store_program_loop
+push STORE_REMAINING_ADDR
+read
+dup
+jz store_program_done
+pop
+
+push STORE_ADDR
+read
+write
+
+push STORE_ADDR
+read
+push 1
+sub
+push STORE_ADDR
+write
+
+push STORE_REMAINING_ADDR
+read
+push 1
+sub
+push STORE_REMAINING_ADDR
+write
+jmp store_program_loop
+
+label store_program_done
+pop
+ret
+
+label store_input
+push INPUT_LEN_ADDR
+write
+
+push INPUT_LEN_ADDR
+read
+push STORE_REMAINING_ADDR
+write
+
+push INPUT_BASE
+push INPUT_LEN_ADDR
+read
+add
+push 1
+sub
+push STORE_ADDR
+write
+
+label store_input_loop
+push STORE_REMAINING_ADDR
+read
+dup
+jz store_input_done
+pop
+
+push STORE_ADDR
+read
+write
+
+push STORE_ADDR
+read
+push 1
+sub
+push STORE_ADDR
+write
+
+push STORE_REMAINING_ADDR
+read
+push 1
+sub
+push STORE_REMAINING_ADDR
+write
+jmp store_input_loop
+
+label store_input_done
+pop
+ret
+
+label zero_tape
+push DATA_BASE
+push STORE_ADDR
+write
+
+push ZERO_CELLS
+push STORE_REMAINING_ADDR
+write
+
+label zero_tape_loop
+push STORE_REMAINING_ADDR
+read
+dup
+jz zero_tape_done
+pop
+
+push 0
+push STORE_ADDR
+read
+write
+
+push STORE_ADDR
+read
+push 1
+add
+push STORE_ADDR
+write
+
+push STORE_REMAINING_ADDR
+read
+push 1
+sub
+push STORE_REMAINING_ADDR
+write
+jmp zero_tape_loop
+
+label zero_tape_done
+pop
+ret
+
+label skip_forward
+push IP_ADDR
+read
+push 1
+add
+push SCAN_ADDR
+write
+
+push 1
+push SCAN_DEPTH_ADDR
+write
+
+label skip_forward_loop
+push SCAN_ADDR
+read
+call read_program_char
+
+dup
+push OPEN
+sub
+jz skip_forward_open
+
+dup
+push CLOSE
+sub
+jz skip_forward_close
+
+pop
+jmp skip_forward_next
+
+label skip_forward_open
+pop
+push SCAN_DEPTH_ADDR
+read
+push 1
+add
+push SCAN_DEPTH_ADDR
+write
+jmp skip_forward_next
+
+label skip_forward_close
+pop
+push SCAN_DEPTH_ADDR
+read
+push 1
+sub
+push SCAN_DEPTH_ADDR
+write
+
+push SCAN_DEPTH_ADDR
+read
+jz skip_forward_done
+jmp skip_forward_next
+
+label skip_forward_next
+push SCAN_ADDR
+read
+push 1
+add
+push SCAN_ADDR
+write
+jmp skip_forward_loop
+
+label skip_forward_done
+push SCAN_ADDR
+read
+push 1
+add
+push IP_ADDR
+write
+ret
+
+label skip_backward
+push IP_ADDR
+read
+push 1
+sub
+push SCAN_ADDR
+write
+
+push 1
+push SCAN_DEPTH_ADDR
+write
+
+label skip_backward_loop
+push SCAN_ADDR
+read
+call read_program_char
+
+dup
+push CLOSE
+sub
+jz skip_backward_close
+
+dup
+push OPEN
+sub
+jz skip_backward_open
+
+pop
+jmp skip_backward_prev
+
+label skip_backward_close
+pop
+push SCAN_DEPTH_ADDR
+read
+push 1
+add
+push SCAN_DEPTH_ADDR
+write
+jmp skip_backward_prev
+
+label skip_backward_open
+pop
+push SCAN_DEPTH_ADDR
+read
+push 1
+sub
+push SCAN_DEPTH_ADDR
+write
+
+push SCAN_DEPTH_ADDR
+read
+jz skip_backward_done
+jmp skip_backward_prev
+
+label skip_backward_prev
+push SCAN_ADDR
+read
+push 1
+sub
+push SCAN_ADDR
+write
+jmp skip_backward_loop
+
+label skip_backward_done
+push SCAN_ADDR
+read
+push 1
+add
+push IP_ADDR
+write
+ret
+
+label _main
+pushs Enter Brainfuck program:
+emits
+push 32
+emitc
+inputs
+call store_program
+
+call zero_tape
+
+push DATA_BASE
+push DP_ADDR
+write
+
+push 0
+push IP_ADDR
+write
+
+label interpret
+push IP_ADDR
+read
+push PROGRAM_LEN_ADDR
+read
+jge done
+
+push IP_ADDR
+read
+call read_program_char
+
+dup
+push GT
+sub
+jz cmd_right
+
+dup
+push LT
+sub
+jz cmd_left
+
+dup
+push PLUS
+sub
+jz cmd_plus
+
+dup
+push MINUS
+sub
+jz cmd_minus
+
+dup
+push DOT
+sub
+jz cmd_dot
+
+dup
+push COMMA
+sub
+jz cmd_comma
+
+dup
+push OPEN
+sub
+jz cmd_open
+
+dup
+push CLOSE
+sub
+jz cmd_close
+
+pop
+call inc_ip
+jmp interpret
+
+label cmd_right
+pop
+push DP_ADDR
+read
+push 1
+add
+push DP_ADDR
+write
+call inc_ip
+jmp interpret
+
+label cmd_left
+pop
+push DP_ADDR
+read
+push 1
+sub
+push DP_ADDR
+write
+call inc_ip
+jmp interpret
+
+label cmd_plus
+pop
+push DP_ADDR
+read
+read
+push 1
+add
+push DP_ADDR
+read
+write
+call inc_ip
+jmp interpret
+
+label cmd_minus
+pop
+push DP_ADDR
+read
+read
+push 1
+sub
+push DP_ADDR
+read
+write
+call inc_ip
+jmp interpret
+
+label cmd_dot
+pop
+push DP_ADDR
+read
+read
+emitc
+call inc_ip
+jmp interpret
+
+label cmd_comma
+pop
+pushs Enter Brainfuck input:
+emits
+push 32
+emitc
+inputs
+call store_input
+
+push INPUT_LEN_ADDR
+read
+jz cmd_comma_exhausted
+
+push INPUT_BASE
+read
+push DP_ADDR
+read
+write
+
+call inc_ip
+jmp interpret
+
+label cmd_comma_exhausted
+push 0
+push DP_ADDR
+read
+write
+call inc_ip
+jmp interpret
+
+label cmd_open
+pop
+push DP_ADDR
+read
+read
+jz cmd_open_skip
+call inc_ip
+jmp interpret
+
+label cmd_open_skip
+call skip_forward
+jmp interpret
+
+label cmd_close
+pop
+push DP_ADDR
+read
+read
+jz cmd_close_continue
+call skip_backward
+jmp interpret
+
+label cmd_close_continue
+call inc_ip
+jmp interpret
+
+label done
+halt

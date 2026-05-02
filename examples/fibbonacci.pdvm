@@ -1,3 +1,4 @@
+label _main
 push 0
 push 1
 input
@@ -24,6 +25,5 @@ rot
 jmp loop
 
 label done
-
 pop
 print
