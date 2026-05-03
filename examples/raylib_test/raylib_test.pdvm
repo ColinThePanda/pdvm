@@ -1,0 +1,104 @@
+include raylib.pdvm
+
+label color_bg
+    u8 24
+    u8 24
+    u8 29
+    u8 255
+    pack Color
+    ret
+
+label color_cornflower
+    u8 100
+    u8 149
+    u8 237
+    u8 255
+    pack Color
+    ret
+
+label color_text
+    u8 245
+    u8 245
+    u8 245
+    u8 255
+    pack Color
+    ret
+
+label _main
+    call raylib_init
+
+    i32 800
+    i32 600
+    pushs Raylib Test
+    dlcall raylib.InitWindow v i32 i32 str
+
+    i32 60
+    dlcall raylib.SetTargetFPS v i32
+
+    f32 0.0
+    i64 0
+    write
+
+label loop
+    dlcall raylib.WindowShouldClose i32
+    jnz done
+
+    i64 0
+    read
+    f32 120.0
+    dlcall raylib.GetFrameTime f32
+    mul
+    add
+    dup
+    i64 0
+    write
+
+    dlcall raylib.BeginDrawing v
+
+    call color_bg
+    dlcall raylib.ClearBackground v Color
+
+    pushs Raylib Test
+    i32 40
+    dlcall raylib.MeasureText i32 str i32
+
+    i32 800
+    swap
+    sub
+    i32 2
+    div
+
+    i64 1
+    write
+
+    pushs Raylib Test
+    i64 1
+    read
+    i32 40
+    i32 40
+    call color_text
+    dlcall raylib.DrawText v str i32 i32 i32 Color
+
+    f32 400.0
+    f32 300.0
+    f32 200.0
+    f32 200.0
+    pack Rectangle
+
+    f32 100.0
+    f32 100.0
+    pack Vector2
+
+    i64 0
+    read
+
+    call color_cornflower
+    dlcall raylib.DrawRectanglePro v Rectangle Vector2 f32 Color
+
+    dlcall raylib.EndDrawing v
+
+    jmp loop
+
+label done
+    dlcall raylib.CloseWindow v
+    halt

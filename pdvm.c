@@ -2,6 +2,32 @@
 #define NOB_STRIP_PREFIX
 #include "nob.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+#ifndef PDVM_HAS_LIBFFI
+#if defined(__has_include)
+#if __has_include(<ffi.h>)
+#define PDVM_HAS_LIBFFI 1
+#endif
+#endif
+#endif
+
+#ifndef PDVM_HAS_LIBFFI
+#define PDVM_HAS_LIBFFI 0
+#endif
+
+#if PDVM_HAS_LIBFFI
+#include <ffi.h>
+#else
+typedef struct _ffi_type ffi_type;
+#endif
+
+#define ERR(...) fprintf(stderr, __VA_ARGS__)
+
 #define INPUT_BUFFER_SIZE 255
 
 typedef enum
@@ -33,6 +59,8 @@ typedef struct
     Field_Type type;
 
     String_View struct_name;
+    Struct_Def *struct_def;
+    bool owns_struct_def;
 
     size_t offset;
     size_t size;
@@ -60,10 +88,62 @@ typedef struct
 
 typedef struct
 {
+    String_View name;
+    void *handle;
+} Dl_Lib;
+
+typedef struct
+{
+    Dl_Lib *items;
+    size_t count;
+    size_t capacity;
+} Dl_Libs;
+
+typedef struct
+{
+    String_View name;
+    void *ptr;
+    void *owner_handle;
+} Dl_Sym;
+
+typedef struct
+{
+    Dl_Sym *items;
+    size_t count;
+    size_t capacity;
+} Dl_Syms;
+
+typedef struct
+{
     Struct_Def *def;
     uint8_t *data;
     size_t size;
 } Struct_Value;
+
+typedef enum
+{
+    DLCALL_TYPE_VOID,
+    DLCALL_TYPE_SCALAR,
+    DLCALL_TYPE_PTR,
+    DLCALL_TYPE_STR,
+    DLCALL_TYPE_STRUCT,
+} Dlcall_Type_Kind;
+
+typedef struct
+{
+    Dlcall_Type_Kind kind;
+    Value_Type scalar_type;
+    Struct_Def *struct_def;
+    ffi_type *ffi_type_ptr;
+    bool owns_ffi_type;
+} Dlcall_Type;
+
+typedef struct
+{
+    Dlcall_Type type;
+    void *value_storage;
+    void *owned_buffer;
+} Dlcall_Arg;
 
 typedef struct
 {
@@ -86,11 +166,23 @@ typedef struct
     Value *items;
     size_t capacity;
     size_t count;
+    char **ffi_strings;
+    size_t ffi_strings_count;
+    size_t ffi_strings_capacity;
 } Vm;
 
 bool sv_eq_ignore_case(String_View a, const char *b);
 void struct_value_free(Struct_Value *st);
 Struct_Value *struct_value_clone(const Struct_Value *src);
+Struct_Def *struct_def_clone(const Struct_Def *src);
+void struct_def_free(Struct_Def *def);
+void dlcall_arg_free(Dlcall_Arg *arg);
+bool struct_def_lookup(Struct_Defs *defs, String_View name, Struct_Def **out);
+void vm_push(Vm *vm, Value value);
+void vm_pushs(Vm *vm, const char *str);
+Struct_Value *struct_value_new(Struct_Def *def);
+void vm_track_ffi_string(Vm *vm, char *buffer);
+bool vm_error_output(Vm *vm);
 
 Value value_u8(uint8_t num)
 {
@@ -281,6 +373,21 @@ bool field_type_size_align(Field_Type type, size_t *size, size_t *align)
     }
 }
 
+bool struct_field_size_align(Struct_Field field, size_t *size, size_t *align)
+{
+    if (field.type == FIELD_STRUCT)
+    {
+        if (field.struct_def == NULL)
+            return false;
+
+        *size = field.struct_def->size;
+        *align = field.struct_def->align;
+        return true;
+    }
+
+    return field_type_size_align(field.type, size, align);
+}
+
 Value_Type field_type_to_value_type(Field_Type type)
 {
     switch (type)
@@ -304,9 +411,32 @@ Value_Type field_type_to_value_type(Field_Type type)
     }
 }
 
-bool field_matches_value(Field_Type type, Value value)
+bool field_matches_value(Struct_Field field, Value value)
 {
-    return field_type_to_value_type(type) == value.type;
+    if (field.type != FIELD_STRUCT)
+        return field_type_to_value_type(field.type) == value.type;
+
+    if (value.type != VALUE_STRUCT)
+        return false;
+
+    if (field.struct_def != NULL)
+        return sv_eq(field.struct_def->name, value.as.st->def->name);
+
+    if (field.struct_name.count > 0)
+        return sv_eq(field.struct_name, value.as.st->def->name);
+
+    return false;
+}
+
+void field_type_label(Struct_Field field, char *buffer, size_t buffer_size)
+{
+    if (field.type == FIELD_STRUCT && field.struct_name.count > 0)
+    {
+        snprintf(buffer, buffer_size, "%.*s", (int)field.struct_name.count, field.struct_name.data);
+        return;
+    }
+
+    snprintf(buffer, buffer_size, "%s", field_type_name(field.type));
 }
 
 bool parse_scalar_value_type(String_View sv, Value_Type *out)
@@ -325,6 +455,230 @@ bool parse_scalar_value_type(String_View sv, Value_Type *out)
         return false;
 
     return true;
+}
+
+size_t value_type_storage_size(Value_Type type)
+{
+    switch (type)
+    {
+    case VALUE_U8:
+        return sizeof(uint8_t);
+    case VALUE_I32:
+        return sizeof(int32_t);
+    case VALUE_I64:
+        return sizeof(int64_t);
+    case VALUE_F32:
+        return sizeof(float);
+    case VALUE_F64:
+        return sizeof(double);
+    case VALUE_PTR:
+        return sizeof(void *);
+    default:
+        return 0;
+    }
+}
+
+const char *dlcall_type_kind_name(Dlcall_Type type)
+{
+    switch (type.kind)
+    {
+    case DLCALL_TYPE_VOID:
+        return "void";
+    case DLCALL_TYPE_SCALAR:
+        return value_type_name(type.scalar_type);
+    case DLCALL_TYPE_PTR:
+        return "ptr";
+    case DLCALL_TYPE_STR:
+        return "str";
+    case DLCALL_TYPE_STRUCT:
+        return type.struct_def == NULL ? "struct" : temp_sv_to_cstr(type.struct_def->name);
+    default:
+        return "unknown";
+    }
+}
+
+#if PDVM_HAS_LIBFFI
+ffi_type *ffi_type_from_value_type(Value_Type type)
+{
+    switch (type)
+    {
+    case VALUE_U8:
+        return &ffi_type_uint8;
+    case VALUE_I32:
+        return &ffi_type_sint32;
+    case VALUE_I64:
+        return &ffi_type_sint64;
+    case VALUE_F32:
+        return &ffi_type_float;
+    case VALUE_F64:
+        return &ffi_type_double;
+    case VALUE_PTR:
+        return &ffi_type_pointer;
+    default:
+        return NULL;
+    }
+}
+
+void ffi_type_destroy_for_struct(ffi_type *type, Struct_Def *def);
+
+ffi_type *ffi_type_build_for_struct(Struct_Def *def)
+{
+    ffi_type *type = calloc(1, sizeof(*type));
+    ffi_type **elements = calloc(def->fields_count + 1, sizeof(*elements));
+
+    if (type == NULL || elements == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < def->fields_count; i++)
+    {
+        if (def->fields[i].type == FIELD_STRUCT)
+        {
+            if (def->fields[i].struct_def == NULL)
+            {
+                free(elements);
+                free(type);
+                return NULL;
+            }
+
+            elements[i] = ffi_type_build_for_struct(def->fields[i].struct_def);
+            if (elements[i] == NULL)
+            {
+                for (size_t j = 0; j < i; j++)
+                {
+                    if (def->fields[j].type == FIELD_STRUCT)
+                    {
+                        ffi_type_destroy_for_struct(elements[j], def->fields[j].struct_def);
+                    }
+                }
+                free(elements);
+                free(type);
+                return NULL;
+            }
+            continue;
+        }
+
+        elements[i] = ffi_type_from_value_type(field_type_to_value_type(def->fields[i].type));
+        if (elements[i] == NULL)
+        {
+            for (size_t j = 0; j < i; j++)
+            {
+                if (def->fields[j].type == FIELD_STRUCT)
+                {
+                    ffi_type_destroy_for_struct(elements[j], def->fields[j].struct_def);
+                }
+            }
+            free(elements);
+            free(type);
+            return NULL;
+        }
+    }
+
+    type->type = FFI_TYPE_STRUCT;
+    type->elements = elements;
+    return type;
+}
+
+void ffi_type_destroy_for_struct(ffi_type *type, Struct_Def *def)
+{
+    if (type == NULL)
+        return;
+
+    if (def != NULL)
+    {
+        for (size_t i = 0; i < def->fields_count; i++)
+        {
+            if (def->fields[i].type == FIELD_STRUCT)
+            {
+                ffi_type_destroy_for_struct(type->elements[i], def->fields[i].struct_def);
+            }
+        }
+    }
+
+    free(type->elements);
+    free(type);
+}
+#else
+ffi_type *ffi_type_from_value_type(Value_Type type)
+{
+    (void)type;
+    return NULL;
+}
+
+ffi_type *ffi_type_build_for_struct(Struct_Def *def)
+{
+    (void)def;
+    return NULL;
+}
+
+void ffi_type_destroy_for_struct(ffi_type *type, Struct_Def *def)
+{
+    (void)type;
+    (void)def;
+}
+#endif
+
+bool dlcall_type_parse(String_View token, Struct_Defs *struct_defs, bool allow_void, Dlcall_Type *out)
+{
+    *out = (Dlcall_Type){0};
+
+    if (allow_void && sv_eq_ignore_case(token, "v"))
+    {
+        out->kind = DLCALL_TYPE_VOID;
+        out->ffi_type_ptr = &ffi_type_void;
+        return true;
+    }
+
+    if (sv_eq_ignore_case(token, "ptr"))
+    {
+        out->kind = DLCALL_TYPE_PTR;
+        out->scalar_type = VALUE_PTR;
+        out->ffi_type_ptr = ffi_type_from_value_type(VALUE_PTR);
+        return true;
+    }
+
+    if (sv_eq_ignore_case(token, "str"))
+    {
+        out->kind = DLCALL_TYPE_STR;
+        out->ffi_type_ptr = ffi_type_from_value_type(VALUE_PTR);
+        return true;
+    }
+
+    Value_Type scalar_type = VALUE_I64;
+    if (parse_scalar_value_type(token, &scalar_type))
+    {
+        out->kind = DLCALL_TYPE_SCALAR;
+        out->scalar_type = scalar_type;
+        out->ffi_type_ptr = ffi_type_from_value_type(scalar_type);
+        return true;
+    }
+
+    Struct_Def *struct_def = NULL;
+    if (struct_def_lookup(struct_defs, token, &struct_def))
+    {
+        out->kind = DLCALL_TYPE_STRUCT;
+        out->struct_def = struct_def;
+        out->ffi_type_ptr = ffi_type_build_for_struct(struct_def);
+        out->owns_ffi_type = true;
+        return out->ffi_type_ptr != NULL;
+    }
+
+    return false;
+}
+
+void dlcall_type_free(Dlcall_Type *type)
+{
+    if (type == NULL)
+        return;
+
+    if (type->owns_ffi_type)
+    {
+        ffi_type_destroy_for_struct(type->ffi_type_ptr, type->struct_def);
+    }
+
+    *type = (Dlcall_Type){0};
 }
 
 bool value_type_is_integer(Value_Type type)
@@ -385,7 +739,7 @@ bool value_require_numeric(Value value, const char *op_name)
     if (value_is_numeric(value))
         return true;
 
-    printf("%s only supports numeric values\n", op_name);
+    ERR("%s only supports numeric values\n", op_name);
     return false;
 }
 
@@ -394,7 +748,7 @@ bool value_require_text_output(Value value, const char *op_name)
     if (value_supports_text_output(value))
         return true;
 
-    printf("%s does not support %s values\n", op_name, value_type_name(value.type));
+    ERR("%s does not support %s values\n", op_name, value_type_name(value.type));
     return false;
 }
 
@@ -690,6 +1044,33 @@ typedef struct
     size_t capacity;
 } ConstLineNums;
 
+typedef struct
+{
+    String_View name;
+} Preproc_Def;
+
+typedef struct
+{
+    Preproc_Def *items;
+    size_t count;
+    size_t capacity;
+} Preproc_Defs;
+
+typedef struct
+{
+    bool parent_active;
+    bool active;
+    bool branch_taken;
+    bool saw_else;
+} Preproc_Cond_Frame;
+
+typedef struct
+{
+    Preproc_Cond_Frame *items;
+    size_t count;
+    size_t capacity;
+} Preproc_Cond_Stack;
+
 String_View sv_dup_owned(String_View sv)
 {
     char *data = malloc(sv.count);
@@ -732,11 +1113,82 @@ bool struct_def_lookup(Struct_Defs *defs, String_View name, Struct_Def **out)
     return false;
 }
 
+bool preproc_def_lookup(Preproc_Defs *defs, String_View name)
+{
+    for (size_t i = 0; i < defs->count; i++)
+    {
+        if (sv_eq(defs->items[i].name, name))
+            return true;
+    }
+
+    return false;
+}
+
+bool preproc_defs_define(Preproc_Defs *defs, String_View name)
+{
+    if (preproc_def_lookup(defs, name))
+        return true;
+
+    Preproc_Def def = {
+        .name = sv_dup_owned(name),
+    };
+
+    da_append(defs, def);
+    return true;
+}
+
+void preproc_defs_undef(Preproc_Defs *defs, String_View name)
+{
+    for (size_t i = 0; i < defs->count; i++)
+    {
+        if (!sv_eq(defs->items[i].name, name))
+            continue;
+
+        free((void *)defs->items[i].name.data);
+        for (size_t j = i + 1; j < defs->count; j++)
+        {
+            defs->items[j - 1] = defs->items[j];
+        }
+        defs->count--;
+        return;
+    }
+}
+
+void preproc_defs_free(Preproc_Defs defs)
+{
+    for (size_t i = 0; i < defs.count; i++)
+    {
+        free((void *)defs.items[i].name.data);
+    }
+
+    da_free(defs);
+}
+
+bool preproc_defs_add_host_builtins(Preproc_Defs *defs)
+{
+#ifdef _WIN32
+    return preproc_defs_define(defs, sv_from_cstr("OS_WINDOWS"));
+#elif defined(__APPLE__)
+    return preproc_defs_define(defs, sv_from_cstr("OS_MACOS"));
+#elif defined(__linux__)
+    return preproc_defs_define(defs, sv_from_cstr("OS_LINUX"));
+#else
+    (void)defs;
+    return true;
+#endif
+}
+
 void struct_field_free(Struct_Field *field)
 {
     if (field->type == FIELD_STRUCT && field->struct_name.count > 0)
     {
         free((void *)field->struct_name.data);
+    }
+
+    if (field->type == FIELD_STRUCT && field->owns_struct_def && field->struct_def != NULL)
+    {
+        struct_def_free(field->struct_def);
+        free(field->struct_def);
     }
 }
 
@@ -759,6 +1211,180 @@ void struct_defs_free(Struct_Defs defs)
     }
 
     da_free(defs);
+}
+
+bool dl_lib_lookup(Dl_Libs *libs, String_View name, Dl_Lib **out)
+{
+    for (size_t i = 0; i < libs->count; i++)
+    {
+        if (sv_eq(libs->items[i].name, name))
+        {
+            *out = &libs->items[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool dl_sym_lookup(Dl_Syms *syms, String_View name, Dl_Sym **out)
+{
+    for (size_t i = 0; i < syms->count; i++)
+    {
+        if (sv_eq(syms->items[i].name, name))
+        {
+            *out = &syms->items[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool dl_lib_define(Dl_Libs *libs, String_View name, void *handle)
+{
+    Dl_Lib *existing = NULL;
+
+    if (dl_lib_lookup(libs, name, &existing))
+    {
+        ERR("Dynamic library already exists: %.*s\n", (int)name.count, name.data);
+        return false;
+    }
+
+    Dl_Lib lib = {
+        .name = sv_dup_owned(name),
+        .handle = handle,
+    };
+
+    da_append(libs, lib);
+    return true;
+}
+
+bool dl_sym_define(Dl_Syms *syms, String_View name, void *ptr, void *owner_handle)
+{
+    Dl_Sym *existing = NULL;
+
+    if (dl_sym_lookup(syms, name, &existing))
+    {
+        ERR("Dynamic symbol already exists: %.*s\n", (int)name.count, name.data);
+        return false;
+    }
+
+    Dl_Sym sym = {
+        .name = sv_dup_owned(name),
+        .ptr = ptr,
+        .owner_handle = owner_handle,
+    };
+
+    da_append(syms, sym);
+    return true;
+}
+
+void dl_syms_remove_by_owner(Dl_Syms *syms, void *owner_handle)
+{
+    size_t write_index = 0;
+
+    for (size_t i = 0; i < syms->count; i++)
+    {
+        if (syms->items[i].owner_handle == owner_handle)
+        {
+            free((void *)syms->items[i].name.data);
+            continue;
+        }
+
+        if (write_index != i)
+        {
+            syms->items[write_index] = syms->items[i];
+        }
+        write_index++;
+    }
+
+    syms->count = write_index;
+}
+
+#ifdef _WIN32
+const char *vm_dl_last_error(void)
+{
+    static char buffer[512];
+    DWORD error = GetLastError();
+
+    DWORD written = FormatMessageA(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        error,
+        0,
+        buffer,
+        (DWORD)sizeof(buffer),
+        NULL);
+
+    if (written == 0)
+    {
+        snprintf(buffer, sizeof(buffer), "Windows error %lu", (unsigned long)error);
+    }
+
+    return buffer;
+}
+
+void *vm_dlopen(const char *path)
+{
+    return (void *)LoadLibraryA(path);
+}
+
+void *vm_dlsym(void *handle, const char *symbol)
+{
+    return (void *)GetProcAddress((HMODULE)handle, symbol);
+}
+
+bool vm_dlclose(void *handle)
+{
+    return FreeLibrary((HMODULE)handle) != 0;
+}
+#else
+const char *vm_dl_last_error(void)
+{
+    const char *error = dlerror();
+    return error == NULL ? "Unknown dlerror" : error;
+}
+
+void *vm_dlopen(const char *path)
+{
+    return dlopen(path, RTLD_NOW);
+}
+
+void *vm_dlsym(void *handle, const char *symbol)
+{
+    dlerror();
+    return dlsym(handle, symbol);
+}
+
+bool vm_dlclose(void *handle)
+{
+    return dlclose(handle) == 0;
+}
+#endif
+
+void dl_libs_free(Dl_Libs libs)
+{
+    for (size_t i = 0; i < libs.count; i++)
+    {
+        if (libs.items[i].handle != NULL)
+        {
+            (void)vm_dlclose(libs.items[i].handle);
+        }
+        free((void *)libs.items[i].name.data);
+    }
+
+    da_free(libs);
+}
+
+void dl_syms_free(Dl_Syms syms)
+{
+    for (size_t i = 0; i < syms.count; i++)
+    {
+        free((void *)syms.items[i].name.data);
+    }
+
+    da_free(syms);
 }
 
 Struct_Def *struct_def_clone(const Struct_Def *src)
@@ -792,6 +1418,11 @@ Struct_Def *struct_def_clone(const Struct_Def *src)
             if (copy->fields[i].type == FIELD_STRUCT && copy->fields[i].struct_name.count > 0)
             {
                 copy->fields[i].struct_name = sv_dup_owned(src->fields[i].struct_name);
+                if (src->fields[i].struct_def != NULL)
+                {
+                    copy->fields[i].struct_def = struct_def_clone(src->fields[i].struct_def);
+                    copy->fields[i].owns_struct_def = true;
+                }
             }
         }
     }
@@ -850,7 +1481,7 @@ bool struct_def_define(Struct_Defs *defs, Struct_Def def)
 
     if (struct_def_lookup(defs, def.name, &existing))
     {
-        printf("Struct already exists: %.*s\n", (int)def.name.count, def.name.data);
+        ERR("Struct already exists: %.*s\n", (int)def.name.count, def.name.data);
         return false;
     }
 
@@ -858,7 +1489,7 @@ bool struct_def_define(Struct_Defs *defs, Struct_Def def)
     return true;
 }
 
-bool parse_struct_line(String_View input, Struct_Def *out)
+bool parse_struct_line(String_View input, Struct_Defs *defs, Struct_Def *out)
 {
     String_View name = sv_chop_by_delim(&input, ' ');
     name = sv_trim(name);
@@ -880,30 +1511,49 @@ bool parse_struct_line(String_View input, Struct_Def *out)
             continue;
 
         Field_Type type = FIELD_U8;
-        if (!field_type_parse(field_sv, &type) || type == FIELD_STRUCT)
+        Struct_Def *field_struct_def = NULL;
+        String_View field_struct_name = {0};
+
+        if (field_type_parse(field_sv, &type))
         {
-            printf("Unsupported struct field type: %.*s\n", (int)field_sv.count, field_sv.data);
+            field_struct_name = (String_View){0};
+        }
+        else if (struct_def_lookup(defs, field_sv, &field_struct_def))
+        {
+            type = FIELD_STRUCT;
+            field_struct_name = sv_dup_owned(field_sv);
+        }
+        else
+        {
+            ERR("Unsupported struct field type: %.*s\n", (int)field_sv.count, field_sv.data);
             struct_def_free(&def);
             return false;
         }
 
         size_t field_size = 0;
         size_t field_align = 0;
-        if (!field_type_size_align(type, &field_size, &field_align))
+        Struct_Field field = {
+            .type = type,
+            .struct_name = field_struct_name,
+            .struct_def = field_struct_def,
+            .owns_struct_def = false,
+            .offset = 0,
+            .size = 0,
+            .align = 0,
+        };
+
+        if (!struct_field_size_align(field, &field_size, &field_align))
         {
+            if (field.type == FIELD_STRUCT && field.struct_name.count > 0)
+                free((void *)field.struct_name.data);
             struct_def_free(&def);
             return false;
         }
 
         def.size = align_up_size(def.size, field_align);
-
-        Struct_Field field = {
-            .type = type,
-            .struct_name = {0},
-            .offset = def.size,
-            .size = field_size,
-            .align = field_align,
-        };
+        field.offset = def.size;
+        field.size = field_size;
+        field.align = field_align;
 
         if (def.fields_count >= def.fields_capacity)
         {
@@ -940,7 +1590,7 @@ bool memory_ensure(Memory *memory, int64_t addr)
 {
     if (addr < 0)
     {
-        printf("Memory address out of range\n");
+        ERR("Memory address out of range\n");
         return false;
     }
 
@@ -949,7 +1599,7 @@ bool memory_ensure(Memory *memory, int64_t addr)
 
     if (index > (SIZE_MAX / sizeof(Value)) - 1)
     {
-        printf("Memory address out of range\n");
+        ERR("Memory address out of range\n");
         return false;
     }
 
@@ -1004,13 +1654,13 @@ bool value_try_as_index(Value value, size_t *out, const char *name)
 
     if (!value_try_as_i64(value, &raw))
     {
-        printf("%s must be an integer value\n", name);
+        ERR("%s must be an integer value\n", name);
         return false;
     }
 
     if (raw < 0)
     {
-        printf("%s out of range\n", name);
+        ERR("%s out of range\n", name);
         return false;
     }
 
@@ -1287,6 +1937,15 @@ Value struct_field_value_from_bytes(Struct_Field field, const uint8_t *data)
         memcpy(&value, data + field.offset, sizeof(value));
         return value_ptr(value);
     }
+    case FIELD_STRUCT:
+    {
+        if (field.struct_def == NULL)
+            return value_i64(0);
+
+        Struct_Value *st = struct_value_new(field.struct_def);
+        memcpy(st->data, data + field.offset, field.size);
+        return value_struct(st);
+    }
     default:
         return value_i64(0);
     }
@@ -1294,7 +1953,7 @@ Value struct_field_value_from_bytes(Struct_Field field, const uint8_t *data)
 
 bool struct_field_store_bytes(Struct_Field field, uint8_t *data, Value value)
 {
-    if (!field_matches_value(field.type, value))
+    if (!field_matches_value(field, value))
         return false;
 
     switch (field.type)
@@ -1316,6 +1975,9 @@ bool struct_field_store_bytes(Struct_Field field, uint8_t *data, Value value)
         return true;
     case FIELD_PTR:
         memcpy(data + field.offset, &value.as.ptr, sizeof(value.as.ptr));
+        return true;
+    case FIELD_STRUCT:
+        memcpy(data + field.offset, value.as.st->data, field.size);
         return true;
     default:
         return false;
@@ -1413,9 +2075,393 @@ unsigned char value_to_char(Value value)
     return (unsigned char)value_as_i64(value);
 }
 
+bool value_is_text_byte(Value value)
+{
+    return value_is_numeric(value);
+}
+
+bool dlcall_arg_store_scalar(Value value, Value_Type type, void **out_storage)
+{
+    void *storage = calloc(1, value_type_storage_size(type));
+    if (storage == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    switch (type)
+    {
+    case VALUE_U8:
+        if (value.type != VALUE_U8)
+            return free(storage), false;
+        memcpy(storage, &value.as.u8, sizeof(value.as.u8));
+        break;
+    case VALUE_I32:
+        if (value.type != VALUE_I32)
+            return free(storage), false;
+        memcpy(storage, &value.as.i32, sizeof(value.as.i32));
+        break;
+    case VALUE_I64:
+        if (value.type != VALUE_I64)
+            return free(storage), false;
+        memcpy(storage, &value.as.i64, sizeof(value.as.i64));
+        break;
+    case VALUE_F32:
+        if (value.type != VALUE_F32)
+            return free(storage), false;
+        memcpy(storage, &value.as.f32, sizeof(value.as.f32));
+        break;
+    case VALUE_F64:
+        if (value.type != VALUE_F64)
+            return free(storage), false;
+        memcpy(storage, &value.as.f64, sizeof(value.as.f64));
+        break;
+    default:
+        free(storage);
+        return false;
+    }
+
+    *out_storage = storage;
+    return true;
+}
+
+void dlcall_arg_free(Dlcall_Arg *arg)
+{
+    if (arg == NULL)
+        return;
+
+    free(arg->value_storage);
+    free(arg->owned_buffer);
+    dlcall_type_free(&arg->type);
+    *arg = (Dlcall_Arg){0};
+}
+
+void dlcall_args_free(Dlcall_Arg *args, size_t arg_count)
+{
+    if (args == NULL)
+        return;
+
+    for (size_t i = 0; i < arg_count; i++)
+    {
+        dlcall_arg_free(&args[i]);
+    }
+
+    free(args);
+}
+
+bool vm_collect_string_arg(Vm *vm, size_t *cursor, Dlcall_Arg *arg)
+{
+    if (*cursor == 0)
+    {
+        ERR("dlcall string argument is missing length\n");
+        return false;
+    }
+
+    Value len_value = vm->items[*cursor - 1];
+    if (len_value.type != VALUE_I64 || len_value.as.i64 < 0)
+    {
+        ERR("dlcall string argument requires i64 length on top of the stack\n");
+        return false;
+    }
+
+    size_t len = (size_t)len_value.as.i64;
+    if (len > (*cursor - 1))
+    {
+        ERR("dlcall string argument length is out of range\n");
+        return false;
+    }
+
+    size_t start = *cursor - 1 - len;
+    for (size_t i = start; i < *cursor - 1; i++)
+    {
+        if (!value_is_text_byte(vm->items[i]))
+        {
+            ERR("dlcall string argument contains non-text-compatible values\n");
+            return false;
+        }
+    }
+
+    char *buffer = malloc(len + 1);
+    void *storage = calloc(1, sizeof(char *));
+    if (buffer == NULL || storage == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = 0; i < len; i++)
+    {
+        buffer[i] = (char)value_to_char(vm->items[start + i]);
+    }
+    buffer[len] = '\0';
+    memcpy(storage, &buffer, sizeof(buffer));
+
+    arg->value_storage = storage;
+    arg->owned_buffer = NULL;
+    vm_track_ffi_string(vm, buffer);
+    *cursor = start;
+    return true;
+}
+
+bool vm_collect_dlcall_arg(Vm *vm, size_t *cursor, Dlcall_Type parsed_type, Dlcall_Arg *arg)
+{
+    *arg = (Dlcall_Arg){
+        .type = parsed_type,
+    };
+
+    switch (parsed_type.kind)
+    {
+    case DLCALL_TYPE_SCALAR:
+        if (*cursor < 1)
+        {
+            ERR("dlcall requires more stack values for %s\n", value_type_name(parsed_type.scalar_type));
+            return false;
+        }
+        if (!dlcall_arg_store_scalar(vm->items[*cursor - 1], parsed_type.scalar_type, &arg->value_storage))
+        {
+            ERR("dlcall expected %s, got %s\n",
+                value_type_name(parsed_type.scalar_type),
+                value_type_name(vm->items[*cursor - 1].type));
+            return false;
+        }
+        (*cursor)--;
+        return true;
+    case DLCALL_TYPE_PTR:
+        if (*cursor < 1)
+        {
+            ERR("dlcall requires more stack values for ptr\n");
+            return false;
+        }
+        if (vm->items[*cursor - 1].type != VALUE_PTR)
+        {
+            ERR("dlcall expected ptr, got %s\n", value_type_name(vm->items[*cursor - 1].type));
+            return false;
+        }
+        arg->value_storage = calloc(1, sizeof(void *));
+        if (arg->value_storage == NULL)
+        {
+            fprintf(stderr, "Out of memory\n");
+            exit(1);
+        }
+        memcpy(arg->value_storage, &vm->items[*cursor - 1].as.ptr, sizeof(void *));
+        (*cursor)--;
+        return true;
+    case DLCALL_TYPE_STR:
+        return vm_collect_string_arg(vm, cursor, arg);
+    case DLCALL_TYPE_STRUCT:
+        if (*cursor < 1)
+        {
+            ERR("dlcall requires more stack values for struct %.*s\n",
+                (int)parsed_type.struct_def->name.count,
+                parsed_type.struct_def->name.data);
+            return false;
+        }
+        if (vm->items[*cursor - 1].type != VALUE_STRUCT)
+        {
+            ERR("dlcall expected struct %.*s, got %s\n",
+                (int)parsed_type.struct_def->name.count,
+                parsed_type.struct_def->name.data,
+                value_type_name(vm->items[*cursor - 1].type));
+            return false;
+        }
+        if (!sv_eq(vm->items[*cursor - 1].as.st->def->name, parsed_type.struct_def->name))
+        {
+            ERR("dlcall expected struct %.*s\n",
+                (int)parsed_type.struct_def->name.count,
+                parsed_type.struct_def->name.data);
+            return false;
+        }
+        arg->value_storage = malloc(parsed_type.struct_def->size == 0 ? 1 : parsed_type.struct_def->size);
+        if (arg->value_storage == NULL)
+        {
+            fprintf(stderr, "Out of memory\n");
+            exit(1);
+        }
+        memcpy(arg->value_storage, vm->items[*cursor - 1].as.st->data, parsed_type.struct_def->size);
+        (*cursor)--;
+        return true;
+    default:
+        ERR("Unsupported dlcall argument type\n");
+        return false;
+    }
+}
+
+void vm_discard_stack_range(Vm *vm, size_t start)
+{
+    for (size_t i = start; i < vm->count; i++)
+    {
+        value_free(&vm->items[i]);
+    }
+
+    vm->count = start;
+}
+
+bool vm_push_dlcall_return(Vm *vm, Dlcall_Type ret_type, void *storage)
+{
+    switch (ret_type.kind)
+    {
+    case DLCALL_TYPE_VOID:
+        return true;
+    case DLCALL_TYPE_SCALAR:
+        switch (ret_type.scalar_type)
+        {
+        case VALUE_U8:
+            vm_push(vm, value_u8(*(uint8_t *)storage));
+            return true;
+        case VALUE_I32:
+            vm_push(vm, value_i32(*(int32_t *)storage));
+            return true;
+        case VALUE_I64:
+            vm_push(vm, value_i64(*(int64_t *)storage));
+            return true;
+        case VALUE_F32:
+            vm_push(vm, value_f32(*(float *)storage));
+            return true;
+        case VALUE_F64:
+            vm_push(vm, value_f64(*(double *)storage));
+            return true;
+        default:
+            return false;
+        }
+    case DLCALL_TYPE_PTR:
+        vm_push(vm, value_ptr(*(void **)storage));
+        return true;
+    case DLCALL_TYPE_STR:
+    {
+        char *str = *(char **)storage;
+        if (str == NULL)
+        {
+            vm_push(vm, value_i64(0));
+        }
+        else
+        {
+            vm_pushs(vm, str);
+        }
+        return true;
+    }
+    case DLCALL_TYPE_STRUCT:
+    {
+        Struct_Value *st = struct_value_new(ret_type.struct_def);
+        memcpy(st->data, storage, ret_type.struct_def->size);
+        vm_push(vm, value_struct(st));
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool vm_dlcall(Vm *vm, Struct_Defs *struct_defs, void *symbol_ptr, String_View symbol_name, Dlcall_Type ret_type, String_View *arg_tokens, size_t arg_count)
+{
+    (void)struct_defs;
+#if !PDVM_HAS_LIBFFI
+    (void)vm;
+    (void)symbol_ptr;
+    (void)symbol_name;
+    (void)ret_type;
+    (void)arg_tokens;
+    (void)arg_count;
+    ERR("dlcall requires pdvm to be built with libffi support\n");
+    return false;
+#else
+    Dlcall_Arg *args = calloc(arg_count == 0 ? 1 : arg_count, sizeof(*args));
+    ffi_type **arg_ffi_types = calloc(arg_count == 0 ? 1 : arg_count, sizeof(*arg_ffi_types));
+    void **arg_values = calloc(arg_count == 0 ? 1 : arg_count, sizeof(*arg_values));
+    void *ret_storage = NULL;
+    size_t cursor = vm->count;
+    bool result = false;
+
+    if (args == NULL || arg_ffi_types == NULL || arg_values == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    for (size_t i = arg_count; i-- > 0;)
+    {
+        Dlcall_Type arg_type = {0};
+        if (!dlcall_type_parse(arg_tokens[i], struct_defs, false, &arg_type))
+        {
+            ERR("Unknown dlcall argument type: %.*s\n", (int)arg_tokens[i].count, arg_tokens[i].data);
+            goto defer;
+        }
+
+        if (!vm_collect_dlcall_arg(vm, &cursor, arg_type, &args[i]))
+        {
+            dlcall_type_free(&arg_type);
+            goto defer;
+        }
+
+        arg_ffi_types[i] = args[i].type.ffi_type_ptr;
+        arg_values[i] = args[i].value_storage;
+    }
+
+    ffi_cif cif = {0};
+    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned int)arg_count, ret_type.ffi_type_ptr, arg_ffi_types) != FFI_OK)
+    {
+        ERR("ffi_prep_cif failed for dlcall %.*s\n", (int)symbol_name.count, symbol_name.data);
+        goto defer;
+    }
+
+    switch (ret_type.kind)
+    {
+    case DLCALL_TYPE_VOID:
+        ret_storage = NULL;
+        break;
+    case DLCALL_TYPE_SCALAR:
+        ret_storage = calloc(1, value_type_storage_size(ret_type.scalar_type));
+        break;
+    case DLCALL_TYPE_PTR:
+    case DLCALL_TYPE_STR:
+        ret_storage = calloc(1, sizeof(void *));
+        break;
+    case DLCALL_TYPE_STRUCT:
+        ret_storage = calloc(1, ret_type.struct_def->size == 0 ? 1 : ret_type.struct_def->size);
+        break;
+    default:
+        break;
+    }
+
+    if (ret_type.kind != DLCALL_TYPE_VOID && ret_storage == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    ffi_call(&cif, FFI_FN(symbol_ptr), ret_storage, arg_values);
+    vm_discard_stack_range(vm, cursor);
+    result = vm_push_dlcall_return(vm, ret_type, ret_storage);
+
+defer:
+    free(ret_storage);
+    dlcall_args_free(args, arg_count);
+    free(arg_ffi_types);
+    free(arg_values);
+    return result;
+#endif
+}
+
 void vm_push(Vm *vm, Value value)
 {
     da_append(vm, value);
+}
+
+void vm_track_ffi_string(Vm *vm, char *buffer)
+{
+    if (vm->ffi_strings_count >= vm->ffi_strings_capacity)
+    {
+        size_t new_capacity = vm->ffi_strings_capacity == 0 ? 16 : vm->ffi_strings_capacity * 2;
+        char **new_items = realloc(vm->ffi_strings, new_capacity * sizeof(*new_items));
+        if (new_items == NULL)
+        {
+            fprintf(stderr, "Out of memory\n");
+            exit(1);
+        }
+        vm->ffi_strings = new_items;
+        vm->ffi_strings_capacity = new_capacity;
+    }
+
+    vm->ffi_strings[vm->ffi_strings_count++] = buffer;
 }
 
 Struct_Value *struct_value_new(Struct_Def *def)
@@ -1457,7 +2503,7 @@ void vm_inputs(Vm *vm)
 
     if (!fgets(input, sizeof(input), stdin))
     {
-        printf("Failed to read input\n");
+        ERR("Failed to read input\n");
         return;
     }
 
@@ -1601,7 +2647,7 @@ bool vm_print(Vm *vm)
     Value value = da_last(vm);
     if (!value_supports_scalar_print(value))
     {
-        printf("print does not support %s values\n", value_type_name(value.type));
+        ERR("print does not support %s values\n", value_type_name(value.type));
         return false;
     }
 
@@ -1631,6 +2677,15 @@ void vm_clear(Vm *vm)
     }
 
     vm->count = 0;
+
+    for (size_t i = 0; i < vm->ffi_strings_count; i++)
+    {
+        free(vm->ffi_strings[i]);
+    }
+    free(vm->ffi_strings);
+    vm->ffi_strings = NULL;
+    vm->ffi_strings_count = 0;
+    vm->ffi_strings_capacity = 0;
 }
 
 bool vm_neg(Vm *vm)
@@ -1831,7 +2886,7 @@ void vm_input(Vm *vm)
 
     if (!fgets(input, sizeof(input), stdin))
     {
-        printf("Failed to read input\n");
+        ERR("Failed to read input\n");
         return;
     }
 
@@ -1839,7 +2894,7 @@ void vm_input(Vm *vm)
 
     if (!parse_default_value(input, &value))
     {
-        printf("Input must be a number\n");
+        ERR("Input must be a number\n");
         return;
     }
 
@@ -1922,7 +2977,7 @@ bool vm_prints(Vm *vm)
 
     if (!value_try_as_index(len_value, &len, "String length") || len > vm->count)
     {
-        printf("Invalid string length\n");
+        ERR("Invalid string length\n");
         value_free(&len_value);
         return false;
     }
@@ -1952,7 +3007,7 @@ bool vm_emit(Vm *vm)
     Value value = vm_pop(vm);
     if (!value_supports_scalar_print(value))
     {
-        printf("emit does not support %s values\n", value_type_name(value.type));
+        ERR("emit does not support %s values\n", value_type_name(value.type));
         value_free(&value);
         return false;
     }
@@ -1983,7 +3038,7 @@ bool vm_emits(Vm *vm)
 
     if (!value_try_as_index(len_value, &len, "String length") || len > vm->count)
     {
-        printf("Invalid string length\n");
+        ERR("Invalid string length\n");
         value_free(&len_value);
         return false;
     }
@@ -2002,6 +3057,40 @@ bool vm_emits(Vm *vm)
     for (size_t i = start; i < vm->count; i++)
     {
         fputc(value_to_char(vm->items[i]), stdout);
+        value_free(&vm->items[i]);
+    }
+
+    vm->count = start;
+    value_free(&len_value);
+    return true;
+}
+
+bool vm_error_output(Vm *vm)
+{
+    Value len_value = vm_pop(vm);
+    size_t len = 0;
+
+    if (!value_try_as_index(len_value, &len, "String length") || len > vm->count)
+    {
+        ERR("Invalid string length\n");
+        value_free(&len_value);
+        return false;
+    }
+
+    size_t start = vm->count - len;
+
+    for (size_t i = start; i < vm->count; i++)
+    {
+        if (!value_require_text_output(vm->items[i], "error"))
+        {
+            value_free(&len_value);
+            return false;
+        }
+    }
+
+    for (size_t i = start; i < vm->count; i++)
+    {
+        fputc(value_to_char(vm->items[i]), stderr);
         value_free(&vm->items[i]);
     }
 
@@ -2040,21 +3129,23 @@ bool vm_pack(Vm *vm, Struct_Def *def)
 {
     if (vm->count < def->fields_count)
     {
-        printf("pack %.*s requires %zu values on the stack\n", (int)def->name.count, def->name.data, def->fields_count);
+        ERR("pack %.*s requires %zu values on the stack\n", (int)def->name.count, def->name.data, def->fields_count);
         return false;
     }
 
     size_t start = vm->count - def->fields_count;
     for (size_t i = 0; i < def->fields_count; i++)
     {
-        if (!field_matches_value(def->fields[i].type, vm->items[start + i]))
+        if (!field_matches_value(def->fields[i], vm->items[start + i]))
         {
-            printf("pack %.*s field %zu requires %s, got %s\n",
-                   (int)def->name.count,
-                   def->name.data,
-                   i,
-                   field_type_name(def->fields[i].type),
-                   value_type_name(vm->items[start + i].type));
+            char expected[128];
+            field_type_label(def->fields[i], expected, sizeof(expected));
+            ERR("pack %.*s field %zu requires %s, got %s\n",
+                (int)def->name.count,
+                def->name.data,
+                i,
+                expected,
+                value_type_name(vm->items[start + i].type));
             return false;
         }
     }
@@ -2081,21 +3172,21 @@ bool vm_get_field(Vm *vm, Struct_Def *def, size_t index)
 
     if (value.type != VALUE_STRUCT)
     {
-        printf("get requires a struct value\n");
+        ERR("get requires a struct value\n");
         value_free(&value);
         return false;
     }
 
     if (!sv_eq(value.as.st->def->name, def->name))
     {
-        printf("get expected struct %.*s\n", (int)def->name.count, def->name.data);
+        ERR("get expected struct %.*s\n", (int)def->name.count, def->name.data);
         value_free(&value);
         return false;
     }
 
     if (index >= def->fields_count)
     {
-        printf("get index out of range for %.*s\n", (int)def->name.count, def->name.data);
+        ERR("get index out of range for %.*s\n", (int)def->name.count, def->name.data);
         value_free(&value);
         return false;
     }
@@ -2113,7 +3204,7 @@ bool vm_set_field(Vm *vm, Struct_Def *def, size_t index)
 
     if (struct_value.type != VALUE_STRUCT)
     {
-        printf("set requires a struct value\n");
+        ERR("set requires a struct value\n");
         value_free(&field_value);
         value_free(&struct_value);
         return false;
@@ -2121,7 +3212,7 @@ bool vm_set_field(Vm *vm, Struct_Def *def, size_t index)
 
     if (!sv_eq(struct_value.as.st->def->name, def->name))
     {
-        printf("set expected struct %.*s\n", (int)def->name.count, def->name.data);
+        ERR("set expected struct %.*s\n", (int)def->name.count, def->name.data);
         value_free(&field_value);
         value_free(&struct_value);
         return false;
@@ -2129,20 +3220,22 @@ bool vm_set_field(Vm *vm, Struct_Def *def, size_t index)
 
     if (index >= def->fields_count)
     {
-        printf("set index out of range for %.*s\n", (int)def->name.count, def->name.data);
+        ERR("set index out of range for %.*s\n", (int)def->name.count, def->name.data);
         value_free(&field_value);
         value_free(&struct_value);
         return false;
     }
 
-    if (!field_matches_value(def->fields[index].type, field_value))
+    if (!field_matches_value(def->fields[index], field_value))
     {
-        printf("set %.*s field %zu requires %s, got %s\n",
-               (int)def->name.count,
-               def->name.data,
-               index,
-               field_type_name(def->fields[index].type),
-               value_type_name(field_value.type));
+        char expected[128];
+        field_type_label(def->fields[index], expected, sizeof(expected));
+        ERR("set %.*s field %zu requires %s, got %s\n",
+            (int)def->name.count,
+            def->name.data,
+            index,
+            expected,
+            value_type_name(field_value.type));
         value_free(&field_value);
         value_free(&struct_value);
         return false;
@@ -2170,7 +3263,7 @@ bool vm_jump(Labels labels, String_View label_name, size_t *ip)
 
     if (!label_lookup(labels, label_name, &target))
     {
-        printf("Unknown label: %.*s\n", (int)label_name.count, label_name.data);
+        ERR("Unknown label: %.*s\n", (int)label_name.count, label_name.data);
         return false;
     }
 
@@ -2199,7 +3292,7 @@ bool const_define(Consts *consts, String_View name, Value value)
 
     if (const_lookup(consts, name, &existing_value))
     {
-        printf("Constant already exists: %.*s\n", (int)name.count, name.data);
+        ERR("Constant already exists: %.*s\n", (int)name.count, name.data);
         return false;
     }
 
@@ -2266,11 +3359,11 @@ bool parse_explicit_value(Consts *consts, Value_Type type, String_View input, Va
     {
         if (out->type != type)
         {
-            printf("Constant %.*s is %s, not %s\n",
-                   (int)input.count,
-                   input.data,
-                   value_type_name(out->type),
-                   value_type_name(type));
+            ERR("Constant %.*s is %s, not %s\n",
+                (int)input.count,
+                input.data,
+                value_type_name(out->type),
+                value_type_name(type));
             return false;
         }
 
@@ -2334,7 +3427,7 @@ bool parse_size_t_sv(String_View sv, size_t *out)
     return true;
 }
 
-int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, bool console, String_View line)
+int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, Dl_Libs *dl_libs, Dl_Syms *dl_syms, bool console, String_View line)
 {
     line = sv_trim_line_end(line);
     line = sv_trim_left(line);
@@ -2358,9 +3451,9 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         Struct_Def def = {0};
 
-        if (!parse_struct_line(line, &def))
+        if (!parse_struct_line(line, struct_defs, &def))
         {
-            printf("struct requires a name and one or more supported field types\n");
+            ERR("struct requires a name and one or more supported field types\n");
             return 1;
         }
 
@@ -2374,7 +3467,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (line.count == 0)
         {
-            printf("push requires a number or constant\n");
+            ERR("push requires a number or constant\n");
             return 1;
         }
 
@@ -2386,7 +3479,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
         }
         else
         {
-            printf("Invalid number or unknown constant: %.*s\n", (int)line.count, line.data);
+            ERR("Invalid number or unknown constant: %.*s\n", (int)line.count, line.data);
             return 1;
         }
     }
@@ -2398,7 +3491,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (line.count == 0)
         {
-            printf("%.*s requires a value\n", (int)command.count, command.data);
+            ERR("%.*s requires a value\n", (int)command.count, command.data);
             return 1;
         }
 
@@ -2419,7 +3512,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (!parse_explicit_value(consts, type, line, &value))
         {
-            printf("Invalid %s value or constant: %.*s\n", value_type_name(type), (int)line.count, line.data);
+            ERR("Invalid %s value or constant: %.*s\n", value_type_name(type), (int)line.count, line.data);
             return 1;
         }
 
@@ -2429,7 +3522,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (raw_arg.count == 0)
         {
-            printf("pushs requires a string\n");
+            ERR("pushs requires a string\n");
             return 1;
         }
 
@@ -2442,19 +3535,19 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (line.count == 0)
         {
-            printf("convert requires a scalar target type\n");
+            ERR("convert requires a scalar target type\n");
             return 1;
         }
 
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
         if (!parse_scalar_value_type(line, &target_type))
         {
-            printf("convert only supports scalar target types: u8, i32, i64, f32, f64\n");
+            ERR("convert only supports scalar target types: u8, i32, i64, f32, f64\n");
             return 1;
         }
 
@@ -2463,7 +3556,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (!value_convert_scalar(src, target_type, &converted))
         {
-            printf("convert only supports numeric scalar source values\n");
+            ERR("convert only supports numeric scalar source values\n");
             value_free(&src);
             return 1;
         }
@@ -2477,13 +3570,13 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (line.count == 0)
         {
-            printf("pack requires a struct name\n");
+            ERR("pack requires a struct name\n");
             return 1;
         }
 
         if (!struct_def_lookup(struct_defs, line, &def))
         {
-            printf("Unknown struct: %.*s\n", (int)line.count, line.data);
+            ERR("Unknown struct: %.*s\n", (int)line.count, line.data);
             return 1;
         }
 
@@ -2501,25 +3594,25 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (name.count == 0 || line.count == 0)
         {
-            printf("get requires a struct name and index\n");
+            ERR("get requires a struct name and index\n");
             return 1;
         }
 
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
         if (!struct_def_lookup(struct_defs, name, &def))
         {
-            printf("Unknown struct: %.*s\n", (int)name.count, name.data);
+            ERR("Unknown struct: %.*s\n", (int)name.count, name.data);
             return 1;
         }
 
         if (!parse_size_t_sv(line, &index))
         {
-            printf("get index must be a non-negative integer\n");
+            ERR("get index must be a non-negative integer\n");
             return 1;
         }
 
@@ -2537,29 +3630,180 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (name.count == 0 || line.count == 0)
         {
-            printf("set requires a struct name and index\n");
+            ERR("set requires a struct name and index\n");
             return 1;
         }
 
         if (vm->count < 2)
         {
-            printf("There is less than 2 values on the stack\n");
+            ERR("There is less than 2 values on the stack\n");
             return 1;
         }
 
         if (!struct_def_lookup(struct_defs, name, &def))
         {
-            printf("Unknown struct: %.*s\n", (int)name.count, name.data);
+            ERR("Unknown struct: %.*s\n", (int)name.count, name.data);
             return 1;
         }
 
         if (!parse_size_t_sv(line, &index))
         {
-            printf("set index must be a non-negative integer\n");
+            ERR("set index must be a non-negative integer\n");
             return 1;
         }
 
         if (!vm_set_field(vm, def, index))
+            return 1;
+    }
+    else if (sv_eq_ignore_case(command, "dlopen"))
+    {
+        String_View name = sv_chop_by_delim(&raw_arg, ' ');
+        name = sv_trim(name);
+        String_View path = sv_trim_left(raw_arg);
+
+        if (name.count == 0 || path.count == 0)
+        {
+            ERR("dlopen requires a library name and path\n");
+            return 1;
+        }
+
+        void *handle = vm_dlopen(temp_sv_to_cstr(path));
+        if (handle == NULL)
+        {
+            ERR("dlopen failed for %.*s: %s\n", (int)path.count, path.data, vm_dl_last_error());
+            return 1;
+        }
+
+        if (!dl_lib_define(dl_libs, name, handle))
+        {
+            (void)vm_dlclose(handle);
+            return 1;
+        }
+    }
+    else if (sv_eq_ignore_case(command, "dlsym"))
+    {
+        String_View sym_name = sv_chop_by_delim(&raw_arg, ' ');
+        sym_name = sv_trim(sym_name);
+        raw_arg = sv_trim_left(raw_arg);
+
+        String_View lib_name = sv_chop_by_delim(&raw_arg, ' ');
+        lib_name = sv_trim(lib_name);
+        String_View native_name = sv_trim_left(raw_arg);
+
+        Dl_Lib *lib = NULL;
+
+        if (sym_name.count == 0 || lib_name.count == 0 || native_name.count == 0)
+        {
+            ERR("dlsym requires a symbol name, library name, and native symbol\n");
+            return 1;
+        }
+
+        if (!dl_lib_lookup(dl_libs, lib_name, &lib))
+        {
+            ERR("Unknown dynamic library: %.*s\n", (int)lib_name.count, lib_name.data);
+            return 1;
+        }
+
+        void *ptr = vm_dlsym(lib->handle, temp_sv_to_cstr(native_name));
+        if (ptr == NULL)
+        {
+            ERR("dlsym failed for %.*s: %s\n", (int)native_name.count, native_name.data, vm_dl_last_error());
+            return 1;
+        }
+
+        if (!dl_sym_define(dl_syms, sym_name, ptr, lib->handle))
+            return 1;
+    }
+    else if (sv_eq_ignore_case(command, "dlclose"))
+    {
+        Dl_Lib *lib = NULL;
+
+        if (line.count == 0)
+        {
+            ERR("dlclose requires a library name\n");
+            return 1;
+        }
+
+        if (!dl_lib_lookup(dl_libs, line, &lib))
+        {
+            ERR("Unknown dynamic library: %.*s\n", (int)line.count, line.data);
+            return 1;
+        }
+
+        void *owner_handle = lib->handle;
+        dl_syms_remove_by_owner(dl_syms, owner_handle);
+
+        if (!vm_dlclose(owner_handle))
+        {
+            ERR("dlclose failed for %.*s: %s\n", (int)line.count, line.data, vm_dl_last_error());
+            return 1;
+        }
+
+        free((void *)lib->name.data);
+        size_t index = (size_t)(lib - dl_libs->items);
+        for (size_t i = index + 1; i < dl_libs->count; i++)
+        {
+            dl_libs->items[i - 1] = dl_libs->items[i];
+        }
+        dl_libs->count--;
+    }
+    else if (sv_eq_ignore_case(command, "dlcall"))
+    {
+        String_View sym_name = sv_chop_by_delim(&line, ' ');
+        sym_name = sv_trim(sym_name);
+        line = sv_trim(line);
+
+        String_View ret_token = sv_chop_by_delim(&line, ' ');
+        ret_token = sv_trim(ret_token);
+        line = sv_trim(line);
+
+        Dl_Sym *sym = NULL;
+        Dlcall_Type ret_type = {0};
+        String_View *arg_tokens = NULL;
+        size_t arg_count = 0;
+
+        if (sym_name.count == 0 || ret_token.count == 0)
+        {
+            ERR("dlcall requires a symbol name and return type\n");
+            return 1;
+        }
+
+        if (!dl_sym_lookup(dl_syms, sym_name, &sym))
+        {
+            ERR("Unknown dynamic symbol: %.*s\n", (int)sym_name.count, sym_name.data);
+            return 1;
+        }
+
+        if (!dlcall_type_parse(ret_token, struct_defs, true, &ret_type))
+        {
+            ERR("Unknown dlcall return type: %.*s\n", (int)ret_token.count, ret_token.data);
+            return 1;
+        }
+
+        size_t max_arg_tokens = line.count == 0 ? 1 : line.count;
+        arg_tokens = calloc(max_arg_tokens, sizeof(*arg_tokens));
+        if (arg_tokens == NULL)
+        {
+            fprintf(stderr, "Out of memory\n");
+            exit(1);
+        }
+
+        while (line.count > 0)
+        {
+            String_View token = sv_chop_by_delim(&line, ' ');
+            token = sv_trim(token);
+            line = sv_trim(line);
+
+            if (token.count == 0)
+                continue;
+
+            arg_tokens[arg_count++] = token;
+        }
+
+        bool ok = vm_dlcall(vm, struct_defs, sym->ptr, sym_name, ret_type, arg_tokens, arg_count);
+        free(arg_tokens);
+        dlcall_type_free(&ret_type);
+        if (!ok)
             return 1;
     }
     else if (console && sv_eq_ignore_case(command, "const"))
@@ -2569,7 +3813,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (!parse_const_line(line, &name, &value))
         {
-            printf("const requires a type, name, and value\n");
+            ERR("const requires a type, name, and value\n");
             return 1;
         }
 
@@ -2580,7 +3824,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2591,7 +3835,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2604,7 +3848,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2615,7 +3859,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2626,7 +3870,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2637,7 +3881,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2648,7 +3892,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2659,7 +3903,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2670,7 +3914,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2680,7 +3924,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("There needs to be at least one number on the stack\n");
+            ERR("There needs to be at least one number on the stack\n");
             return 1;
         }
 
@@ -2700,7 +3944,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("There needs to be at least one number on the stack\n");
+            ERR("There needs to be at least one number on the stack\n");
             return 1;
         }
 
@@ -2711,7 +3955,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2722,7 +3966,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2733,7 +3977,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2744,7 +3988,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2755,7 +3999,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2766,7 +4010,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2777,7 +4021,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2788,7 +4032,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2799,7 +4043,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("There needs to be at least one number on the stack\n");
+            ERR("There needs to be at least one number on the stack\n");
             return 1;
         }
 
@@ -2810,7 +4054,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2832,7 +4076,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 3)
         {
-            printf("There is less than 3 numbers on the stack\n");
+            ERR("There is less than 3 numbers on the stack\n");
             return 1;
         }
 
@@ -2842,7 +4086,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("There needs to be at least one number on the stack\n");
+            ERR("There needs to be at least one number on the stack\n");
             return 1;
         }
 
@@ -2853,7 +4097,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2864,7 +4108,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2877,7 +4121,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2890,7 +4134,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2903,7 +4147,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2916,7 +4160,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count == 0)
         {
-            printf("Stack is empty\n");
+            ERR("Stack is empty\n");
             return 1;
         }
 
@@ -2926,11 +4170,25 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
         if (console)
             printf("\n");
     }
+    else if (sv_eq_ignore_case(command, "error"))
+    {
+        if (vm->count == 0)
+        {
+            ERR("Stack is empty\n");
+            return 1;
+        }
+
+        if (!vm_error_output(vm))
+            return 1;
+
+        if (console)
+            ERR("\n");
+    }
     else if (sv_eq_ignore_case(command, "dup2"))
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2940,7 +4198,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2950,7 +4208,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     {
         if (vm->count < 2)
         {
-            printf("There is less than 2 numbers on the stack\n");
+            ERR("There is less than 2 numbers on the stack\n");
             return 1;
         }
 
@@ -2966,13 +4224,13 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
     }
     else
     {
-        printf("Command not found\n");
+        ERR("Command not found\n");
     }
 
     return 1;
 }
 
-int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struct_defs)
+int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struct_defs, Dl_Libs *dl_libs, Dl_Syms *dl_syms)
 {
     Lines lines = {0};
     Labels labels = {0};
@@ -3007,7 +4265,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (rest.count == 0)
             {
-                printf("label requires a name\n");
+                ERR("label requires a name\n");
                 return 1;
             }
 
@@ -3020,7 +4278,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
     size_t ip = 0;
     if (!label_lookup(labels, sv_from_cstr("_main"), &ip))
     {
-        printf("Missing entry point: label _main\n");
+        ERR("Missing entry point: label _main\n");
         return 1;
     }
 
@@ -3166,7 +4424,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3197,7 +4455,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3228,7 +4486,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3259,7 +4517,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3290,7 +4548,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3321,7 +4579,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (vm->count < 2)
             {
-                printf("Must have 2 numbers on the stack");
+                ERR("Must have 2 numbers on the stack\n");
                 continue;
             }
 
@@ -3359,7 +4617,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         {
             if (call_stack.count == 0)
             {
-                printf("Call stack is empty\n");
+                ERR("Call stack is empty\n");
                 return 1;
             }
 
@@ -3367,7 +4625,7 @@ int exec_program(Vm *vm, String_View program, Consts *consts, Struct_Defs *struc
         }
         else
         {
-            if (exec_line(vm, &memory, consts, struct_defs, false, line) == 2)
+            if (exec_line(vm, &memory, consts, struct_defs, dl_libs, dl_syms, false, line) == 2)
                 break;
 
             ip++;
@@ -3432,25 +4690,33 @@ void make_include_path(const char *source_filepath, String_View include_name, St
     sb_append_null(out);
 }
 
-bool preprocess_file(const char *filepath, String_Builder *out, Consts *consts, Struct_Defs *struct_defs)
+bool preproc_current_active(Preproc_Cond_Stack *stack)
+{
+    if (stack->count == 0)
+        return true;
+
+    return stack->items[stack->count - 1].active;
+}
+
+bool preprocess_file(const char *filepath, String_Builder *out, Consts *consts, Struct_Defs *struct_defs, Preproc_Defs *defs)
 {
     String_Builder file = {0};
+    Preproc_Cond_Stack cond_stack = {0};
+    bool ok = true;
 
     if (!read_entire_file(filepath, &file))
     {
-        printf("Failed to read file: %s\n", filepath);
+        ERR("Failed to read file: %s\n", filepath);
         return false;
     }
 
     String_View program = sb_to_sv(file);
-    Lines lines = {0};
-    Includes includes = {0};
-    ConstLineNums const_line_nums = {0};
-    ConstLineNums struct_line_nums = {0};
 
     while (program.count > 0)
     {
         String_View line = sv_chop_by_delim(&program, '\n');
+        String_View rest = {0};
+        String_View command = {0};
 
         line = sv_trim_line_end(line);
         line = sv_trim_left(line);
@@ -3460,44 +4726,196 @@ bool preprocess_file(const char *filepath, String_Builder *out, Consts *consts, 
         if (line.data[0] == '#')
             continue;
 
-        da_append(&lines, line);
-    }
-
-    for (size_t i = 0; i < lines.count; i++)
-    {
-        String_View line = lines.items[i];
-        String_View rest = line;
-
-        String_View command = sv_chop_by_delim(&rest, ' ');
+        rest = line;
+        command = sv_chop_by_delim(&rest, ' ');
         command = sv_trim(command);
         rest = sv_trim(rest);
+
+        if (command.count > 0 && command.data[0] == '@')
+        {
+            if (sv_eq_ignore_case(command, "@if"))
+            {
+                String_View name = sv_chop_by_delim(&rest, ' ');
+                name = sv_trim(name);
+
+                if (name.count == 0)
+                {
+                    ERR("@if requires a definition name\n");
+                    ok = false;
+                    break;
+                }
+
+                bool parent_active = preproc_current_active(&cond_stack);
+                bool cond = false;
+
+                if (parent_active)
+                    cond = preproc_def_lookup(defs, name);
+
+                Preproc_Cond_Frame frame = {
+                    .parent_active = parent_active,
+                    .active = parent_active && cond,
+                    .branch_taken = parent_active && cond,
+                    .saw_else = false,
+                };
+                da_append(&cond_stack, frame);
+            }
+            else if (sv_eq_ignore_case(command, "@elif"))
+            {
+                if (cond_stack.count == 0)
+                {
+                    ERR("@elif without matching @if\n");
+                    ok = false;
+                    break;
+                }
+
+                String_View name = sv_chop_by_delim(&rest, ' ');
+                name = sv_trim(name);
+
+                if (name.count == 0)
+                {
+                    ERR("@elif requires a definition name\n");
+                    ok = false;
+                    break;
+                }
+
+                Preproc_Cond_Frame *frame = &cond_stack.items[cond_stack.count - 1];
+                if (frame->saw_else)
+                {
+                    ERR("@elif cannot appear after @else\n");
+                    ok = false;
+                    break;
+                }
+
+                if (!frame->parent_active || frame->branch_taken)
+                {
+                    frame->active = false;
+                }
+                else
+                {
+                    bool cond = preproc_def_lookup(defs, name);
+                    frame->active = cond;
+                    if (cond)
+                        frame->branch_taken = true;
+                }
+            }
+            else if (sv_eq_ignore_case(command, "@else"))
+            {
+                if (cond_stack.count == 0)
+                {
+                    ERR("@else without matching @if\n");
+                    ok = false;
+                    break;
+                }
+
+                Preproc_Cond_Frame *frame = &cond_stack.items[cond_stack.count - 1];
+                if (frame->saw_else)
+                {
+                    ERR("Duplicate @else in conditional block\n");
+                    ok = false;
+                    break;
+                }
+
+                frame->saw_else = true;
+                if (!frame->parent_active || frame->branch_taken)
+                {
+                    frame->active = false;
+                }
+                else
+                {
+                    frame->active = true;
+                    frame->branch_taken = true;
+                }
+            }
+            else if (sv_eq_ignore_case(command, "@endif"))
+            {
+                if (cond_stack.count == 0)
+                {
+                    ERR("@endif without matching @if\n");
+                    ok = false;
+                    break;
+                }
+
+                cond_stack.count--;
+            }
+            else if (sv_eq_ignore_case(command, "@define"))
+            {
+                if (!preproc_current_active(&cond_stack))
+                    continue;
+
+                String_View name = sv_chop_by_delim(&rest, ' ');
+                name = sv_trim(name);
+
+                if (name.count == 0)
+                {
+                    ERR("@define requires a definition name\n");
+                    ok = false;
+                    break;
+                }
+
+                if (!preproc_defs_define(defs, name))
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            else if (sv_eq_ignore_case(command, "@undef"))
+            {
+                if (!preproc_current_active(&cond_stack))
+                    continue;
+
+                String_View name = sv_chop_by_delim(&rest, ' ');
+                name = sv_trim(name);
+
+                if (name.count == 0)
+                {
+                    ERR("@undef requires a definition name\n");
+                    ok = false;
+                    break;
+                }
+
+                preproc_defs_undef(defs, name);
+            }
+            else
+            {
+                ERR("Unknown preprocessor directive: %.*s\n", (int)command.count, command.data);
+                ok = false;
+                break;
+            }
+
+            continue;
+        }
+
+        if (!preproc_current_active(&cond_stack))
+            continue;
 
         if (sv_eq_ignore_case(command, "include"))
         {
             if (rest.count == 0)
             {
-                printf("include requires a file\n");
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
+                ERR("include requires a file\n");
+                ok = false;
+                break;
             }
 
-            da_append(&includes, i);
+            String_Builder include_path = {0};
+            make_include_path(filepath, rest, &include_path);
+
+            if (!preprocess_file(include_path.items, out, consts, struct_defs, defs))
+            {
+                sb_free(include_path);
+                ok = false;
+                break;
+            }
+
+            sb_free(include_path);
         }
         else if (sv_eq_ignore_case(command, "const"))
         {
             if (rest.count == 0)
             {
-                printf("const requires a type, name, and value\n");
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
+                ERR("const requires a type, name, and value\n");
+                ok = false;
+                break;
             }
 
             String_View name = {0};
@@ -3505,132 +4923,51 @@ bool preprocess_file(const char *filepath, String_Builder *out, Consts *consts, 
 
             if (!parse_const_line(rest, &name, &value))
             {
-                printf("const requires a valid typed value: %.*s\n", (int)rest.count, rest.data);
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
+                ERR("const requires a valid typed value: %.*s\n", (int)rest.count, rest.data);
+                ok = false;
+                break;
             }
 
             if (!const_define(consts, name, value))
             {
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
+                ok = false;
+                break;
             }
-            da_append(&const_line_nums, i);
         }
         else if (sv_eq_ignore_case(command, "struct"))
         {
             Struct_Def def = {0};
 
-            if (!parse_struct_line(rest, &def))
+            if (!parse_struct_line(rest, struct_defs, &def))
             {
-                printf("struct requires a valid name and field list: %.*s\n", (int)rest.count, rest.data);
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
+                ERR("struct requires a valid name and field list: %.*s\n", (int)rest.count, rest.data);
+                ok = false;
+                break;
             }
 
             if (!struct_def_define(struct_defs, def))
             {
                 struct_def_free(&def);
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
-            }
-
-            da_append(&struct_line_nums, i);
-        }
-    }
-
-    for (size_t i = 0; i < lines.count; i++)
-    {
-        bool is_const = false;
-        for (size_t j = 0; j < const_line_nums.count; j++) {
-            if (const_line_nums.items[j] == i) {
-                is_const = true;
+                ok = false;
                 break;
             }
-        }
-
-        if (is_const) {
-            continue;
-        }
-
-        bool is_struct = false;
-        for (size_t j = 0; j < struct_line_nums.count; j++) {
-            if (struct_line_nums.items[j] == i) {
-                is_struct = true;
-                break;
-            }
-        }
-
-        if (is_struct) {
-            continue;
-        }
-
-        bool is_include = false;
-
-        for (size_t j = 0; j < includes.count; j++)
-        {
-            if (includes.items[j] == i)
-            {
-                is_include = true;
-                break;
-            }
-        }
-
-        if (is_include)
-        {
-            String_View line = lines.items[i];
-            String_View rest = line;
-
-            String_View command = sv_chop_by_delim(&rest, ' ');
-            command = sv_trim(command);
-            rest = sv_trim(rest);
-
-            String_Builder include_path = {0};
-            make_include_path(filepath, rest, &include_path);
-
-            if (!preprocess_file(include_path.items, out, consts, struct_defs))
-            {
-                sb_free(include_path);
-                sb_free(file);
-                da_free(lines);
-                da_free(includes);
-                da_free(const_line_nums);
-                da_free(struct_line_nums);
-                return false;
-            }
-
-            sb_free(include_path);
         }
         else
         {
-            sb_append_sv(out, lines.items[i]);
+            sb_append_sv(out, line);
             da_append(out, '\n');
         }
     }
 
-    sb_free(file);
-    da_free(lines);
-    da_free(includes);
-    da_free(const_line_nums);
-    da_free(struct_line_nums);
+    if (ok && cond_stack.count != 0)
+    {
+        ERR("Unterminated @if block\n");
+        ok = false;
+    }
 
-    return true;
+    da_free(cond_stack);
+    sb_free(file);
+    return ok;
 }
 
 int console(Vm *vm)
@@ -3638,16 +4975,20 @@ int console(Vm *vm)
     Memory memory = {0};
     Consts consts = {0};
     Struct_Defs struct_defs = {0};
+    Dl_Libs dl_libs = {0};
+    Dl_Syms dl_syms = {0};
     for (;;)
     {
         char input[INPUT_BUFFER_SIZE];
         printf("pdvm> ");
         if (!fgets(input, sizeof(input), stdin))
             break;
-        if (exec_line(vm, &memory, &consts, &struct_defs, true, sv_from_cstr(input)) == 2)
+        if (exec_line(vm, &memory, &consts, &struct_defs, &dl_libs, &dl_syms, true, sv_from_cstr(input)) == 2)
             break;
     }
 
+    dl_syms_free(dl_syms);
+    dl_libs_free(dl_libs);
     consts_free(consts);
     struct_defs_free(struct_defs);
     memory_free(memory);
@@ -3658,19 +4999,39 @@ int exec_file(Vm *vm, char *filepath)
 {
     Consts consts = {0};
     Struct_Defs struct_defs = {0};
+    Preproc_Defs preproc_defs = {0};
+    Dl_Libs dl_libs = {0};
+    Dl_Syms dl_syms = {0};
     String_Builder expanded = {0};
 
-    if (!preprocess_file(filepath, &expanded, &consts, &struct_defs))
+    if (!preproc_defs_add_host_builtins(&preproc_defs))
     {
-        printf("Failed to preprocess file\n");
+        preproc_defs_free(preproc_defs);
+        dl_syms_free(dl_syms);
+        dl_libs_free(dl_libs);
         consts_free(consts);
         struct_defs_free(struct_defs);
         sb_free(expanded);
         return 1;
     }
 
-    int result = exec_program(vm, sb_to_sv(expanded), &consts, &struct_defs);
+    if (!preprocess_file(filepath, &expanded, &consts, &struct_defs, &preproc_defs))
+    {
+        ERR("Failed to preprocess file\n");
+        preproc_defs_free(preproc_defs);
+        dl_syms_free(dl_syms);
+        dl_libs_free(dl_libs);
+        consts_free(consts);
+        struct_defs_free(struct_defs);
+        sb_free(expanded);
+        return 1;
+    }
 
+    int result = exec_program(vm, sb_to_sv(expanded), &consts, &struct_defs, &dl_libs, &dl_syms);
+
+    preproc_defs_free(preproc_defs);
+    dl_syms_free(dl_syms);
+    dl_libs_free(dl_libs);
     consts_free(consts);
     struct_defs_free(struct_defs);
     sb_free(expanded);

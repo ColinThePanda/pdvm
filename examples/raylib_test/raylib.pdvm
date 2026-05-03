@@ -1,0 +1,29 @@
+struct Color u8 u8 u8 u8
+struct Vector2 f32 f32
+struct Rectangle f32 f32 f32 f32
+
+label raylib_init
+    @if OS_WINDOWS
+    dlopen raylib examples/raylib_test/raylib/raylib.dll
+    @elif OS_LINUX
+    dlopen raylib examples/raylib_test/raylib/libraylib.so
+    @elif OS_MACOS
+    dlopen raylib examples/raylib_test/raylib/libraylib.dylib
+    @else
+    pushs Unsupported host OS for raylib_test
+    error
+    halt
+    @endif
+
+    dlsym raylib.InitWindow raylib InitWindow
+    dlsym raylib.CloseWindow raylib CloseWindow
+    dlsym raylib.WindowShouldClose raylib WindowShouldClose
+    dlsym raylib.BeginDrawing raylib BeginDrawing
+    dlsym raylib.EndDrawing raylib EndDrawing
+    dlsym raylib.ClearBackground raylib ClearBackground
+    dlsym raylib.SetTargetFPS raylib SetTargetFPS
+    dlsym raylib.DrawRectanglePro raylib DrawRectanglePro
+    dlsym raylib.GetFrameTime raylib GetFrameTime
+    dlsym raylib.DrawText raylib DrawText
+    dlsym raylib.MeasureText raylib MeasureText
+    ret
