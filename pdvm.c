@@ -26,6 +26,8 @@
 typedef struct _ffi_type ffi_type;
 #endif
 
+#include <inttypes.h>
+
 #define ERR(...) fprintf(stderr, __VA_ARGS__)
 
 #define INPUT_BUFFER_SIZE 255
@@ -33,8 +35,13 @@ typedef struct _ffi_type ffi_type;
 typedef enum
 {
     VALUE_U8,
+    VALUE_I8,
+    VALUE_I16,
+    VALUE_U16,
     VALUE_I32,
+    VALUE_U32,
     VALUE_I64,
+    VALUE_U64,
     VALUE_F32,
     VALUE_F64,
     VALUE_PTR,
@@ -44,8 +51,13 @@ typedef enum
 typedef enum
 {
     FIELD_U8,
+    FIELD_I8,
+    FIELD_I16,
+    FIELD_U16,
     FIELD_I32,
+    FIELD_U32,
     FIELD_I64,
+    FIELD_U64,
     FIELD_F32,
     FIELD_F64,
     FIELD_PTR,
@@ -152,8 +164,13 @@ typedef struct
     union
     {
         uint8_t u8;
+        int8_t i8;
+        int16_t i16;
+        uint16_t u16;
         int32_t i32;
+        uint32_t u32;
         int64_t i64;
+        uint64_t u64;
         float f32;
         double f64;
         void *ptr;
@@ -192,6 +209,30 @@ Value value_u8(uint8_t num)
     };
 }
 
+Value value_i8(int8_t num)
+{
+    return (Value){
+        .type = VALUE_I8,
+        .as.i8 = num,
+    };
+}
+
+Value value_i16(int16_t num)
+{
+    return (Value){
+        .type = VALUE_I16,
+        .as.i16 = num,
+    };
+}
+
+Value value_u16(uint16_t num)
+{
+    return (Value){
+        .type = VALUE_U16,
+        .as.u16 = num,
+    };
+}
+
 Value value_i32(int32_t num)
 {
     return (Value){
@@ -200,11 +241,27 @@ Value value_i32(int32_t num)
     };
 }
 
+Value value_u32(uint32_t num)
+{
+    return (Value){
+        .type = VALUE_U32,
+        .as.u32 = num,
+    };
+}
+
 Value value_i64(int64_t num)
 {
     return (Value){
         .type = VALUE_I64,
         .as.i64 = num,
+    };
+}
+
+Value value_u64(uint64_t num)
+{
+    return (Value){
+        .type = VALUE_U64,
+        .as.u64 = num,
     };
 }
 
@@ -280,10 +337,20 @@ const char *value_type_name(Value_Type type)
     {
     case VALUE_U8:
         return "u8";
+    case VALUE_I8:
+        return "i8";
+    case VALUE_I16:
+        return "i16";
+    case VALUE_U16:
+        return "u16";
     case VALUE_I32:
         return "i32";
+    case VALUE_U32:
+        return "u32";
     case VALUE_I64:
         return "i64";
+    case VALUE_U64:
+        return "u64";
     case VALUE_F32:
         return "f32";
     case VALUE_F64:
@@ -303,10 +370,20 @@ const char *field_type_name(Field_Type type)
     {
     case FIELD_U8:
         return "u8";
+    case FIELD_I8:
+        return "i8";
+    case FIELD_I16:
+        return "i16";
+    case FIELD_U16:
+        return "u16";
     case FIELD_I32:
         return "i32";
+    case FIELD_U32:
+        return "u32";
     case FIELD_I64:
         return "i64";
+    case FIELD_U64:
+        return "u64";
     case FIELD_F32:
         return "f32";
     case FIELD_F64:
@@ -324,10 +401,20 @@ bool field_type_parse(String_View sv, Field_Type *out)
 {
     if (sv_eq_ignore_case(sv, "u8"))
         *out = FIELD_U8;
+    else if (sv_eq_ignore_case(sv, "i8"))
+        *out = FIELD_I8;
+    else if (sv_eq_ignore_case(sv, "i16"))
+        *out = FIELD_I16;
+    else if (sv_eq_ignore_case(sv, "u16"))
+        *out = FIELD_U16;
     else if (sv_eq_ignore_case(sv, "i32"))
         *out = FIELD_I32;
+    else if (sv_eq_ignore_case(sv, "u32"))
+        *out = FIELD_U32;
     else if (sv_eq_ignore_case(sv, "i64"))
         *out = FIELD_I64;
+    else if (sv_eq_ignore_case(sv, "u64"))
+        *out = FIELD_U64;
     else if (sv_eq_ignore_case(sv, "f32"))
         *out = FIELD_F32;
     else if (sv_eq_ignore_case(sv, "f64"))
@@ -348,13 +435,33 @@ bool field_type_size_align(Field_Type type, size_t *size, size_t *align)
         *size = sizeof(uint8_t);
         *align = _Alignof(uint8_t);
         return true;
+    case FIELD_I8:
+        *size = sizeof(int8_t);
+        *align = _Alignof(int8_t);
+        return true;
+    case FIELD_I16:
+        *size = sizeof(int16_t);
+        *align = _Alignof(int16_t);
+        return true;
+    case FIELD_U16:
+        *size = sizeof(uint16_t);
+        *align = _Alignof(uint16_t);
+        return true;
     case FIELD_I32:
         *size = sizeof(int32_t);
         *align = _Alignof(int32_t);
         return true;
+    case FIELD_U32:
+        *size = sizeof(uint32_t);
+        *align = _Alignof(uint32_t);
+        return true;
     case FIELD_I64:
         *size = sizeof(int64_t);
         *align = _Alignof(int64_t);
+        return true;
+    case FIELD_U64:
+        *size = sizeof(uint64_t);
+        *align = _Alignof(uint64_t);
         return true;
     case FIELD_F32:
         *size = sizeof(float);
@@ -394,10 +501,20 @@ Value_Type field_type_to_value_type(Field_Type type)
     {
     case FIELD_U8:
         return VALUE_U8;
+    case FIELD_I8:
+        return VALUE_I8;
+    case FIELD_I16:
+        return VALUE_I16;
+    case FIELD_U16:
+        return VALUE_U16;
     case FIELD_I32:
         return VALUE_I32;
+    case FIELD_U32:
+        return VALUE_U32;
     case FIELD_I64:
         return VALUE_I64;
+    case FIELD_U64:
+        return VALUE_U64;
     case FIELD_F32:
         return VALUE_F32;
     case FIELD_F64:
@@ -443,10 +560,20 @@ bool parse_scalar_value_type(String_View sv, Value_Type *out)
 {
     if (sv_eq_ignore_case(sv, "u8"))
         *out = VALUE_U8;
+    else if (sv_eq_ignore_case(sv, "i8"))
+        *out = VALUE_I8;
+    else if (sv_eq_ignore_case(sv, "i16"))
+        *out = VALUE_I16;
+    else if (sv_eq_ignore_case(sv, "u16"))
+        *out = VALUE_U16;
     else if (sv_eq_ignore_case(sv, "i32"))
         *out = VALUE_I32;
+    else if (sv_eq_ignore_case(sv, "u32"))
+        *out = VALUE_U32;
     else if (sv_eq_ignore_case(sv, "i64"))
         *out = VALUE_I64;
+    else if (sv_eq_ignore_case(sv, "u64"))
+        *out = VALUE_U64;
     else if (sv_eq_ignore_case(sv, "f32"))
         *out = VALUE_F32;
     else if (sv_eq_ignore_case(sv, "f64"))
@@ -463,10 +590,20 @@ size_t value_type_storage_size(Value_Type type)
     {
     case VALUE_U8:
         return sizeof(uint8_t);
+    case VALUE_I8:
+        return sizeof(int8_t);
+    case VALUE_I16:
+        return sizeof(int16_t);
+    case VALUE_U16:
+        return sizeof(uint16_t);
     case VALUE_I32:
         return sizeof(int32_t);
+    case VALUE_U32:
+        return sizeof(uint32_t);
     case VALUE_I64:
         return sizeof(int64_t);
+    case VALUE_U64:
+        return sizeof(uint64_t);
     case VALUE_F32:
         return sizeof(float);
     case VALUE_F64:
@@ -504,10 +641,20 @@ ffi_type *ffi_type_from_value_type(Value_Type type)
     {
     case VALUE_U8:
         return &ffi_type_uint8;
+    case VALUE_I8:
+        return &ffi_type_sint8;
+    case VALUE_I16:
+        return &ffi_type_sint16;
+    case VALUE_U16:
+        return &ffi_type_uint16;
     case VALUE_I32:
         return &ffi_type_sint32;
+    case VALUE_U32:
+        return &ffi_type_uint32;
     case VALUE_I64:
         return &ffi_type_sint64;
+    case VALUE_U64:
+        return &ffi_type_uint64;
     case VALUE_F32:
         return &ffi_type_float;
     case VALUE_F64:
@@ -683,7 +830,20 @@ void dlcall_type_free(Dlcall_Type *type)
 
 bool value_type_is_integer(Value_Type type)
 {
-    return type == VALUE_U8 || type == VALUE_I32 || type == VALUE_I64;
+    switch (type)
+    {
+    case VALUE_U8:
+    case VALUE_I8:
+    case VALUE_I16:
+    case VALUE_U16:
+    case VALUE_I32:
+    case VALUE_U32:
+    case VALUE_I64:
+    case VALUE_U64:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool value_type_is_float(Value_Type type)
@@ -691,16 +851,36 @@ bool value_type_is_float(Value_Type type)
     return type == VALUE_F32 || type == VALUE_F64;
 }
 
-int value_integer_rank(Value_Type type)
+bool value_type_is_signed_integer(Value_Type type)
+{
+    switch (type)
+    {
+    case VALUE_I8:
+    case VALUE_I16:
+    case VALUE_I32:
+    case VALUE_I64:
+        return true;
+    default:
+        return false;
+    }
+}
+
+int value_integer_bits(Value_Type type)
 {
     switch (type)
     {
     case VALUE_U8:
-        return 0;
+    case VALUE_I8:
+        return 8;
+    case VALUE_I16:
+    case VALUE_U16:
+        return 16;
     case VALUE_I32:
-        return 1;
+    case VALUE_U32:
+        return 32;
     case VALUE_I64:
-        return 2;
+    case VALUE_U64:
+        return 64;
     default:
         return -1;
     }
@@ -732,6 +912,310 @@ bool value_supports_text_output(Value value)
 bool value_supports_scalar_print(Value value)
 {
     return value.type != VALUE_STRUCT && value.type != VALUE_PTR;
+}
+
+typedef struct
+{
+    bool negative;
+    unsigned __int128 magnitude;
+} Exact_Int;
+
+unsigned __int128 exact_uint_mask(int bits)
+{
+    return ((((unsigned __int128)1) << bits) - 1);
+}
+
+bool exact_int_from_value(Value value, Exact_Int *out)
+{
+    switch (value.type)
+    {
+    case VALUE_U8:
+        *out = (Exact_Int){.negative = false, .magnitude = value.as.u8};
+        return true;
+    case VALUE_I8:
+        *out = (Exact_Int){
+            .negative = value.as.i8 < 0,
+            .magnitude = (unsigned __int128)(value.as.i8 < 0 ? -(int64_t)value.as.i8 : (int64_t)value.as.i8),
+        };
+        return true;
+    case VALUE_I16:
+        *out = (Exact_Int){
+            .negative = value.as.i16 < 0,
+            .magnitude = (unsigned __int128)(value.as.i16 < 0 ? -(int64_t)value.as.i16 : (int64_t)value.as.i16),
+        };
+        return true;
+    case VALUE_U16:
+        *out = (Exact_Int){.negative = false, .magnitude = value.as.u16};
+        return true;
+    case VALUE_I32:
+        *out = (Exact_Int){
+            .negative = value.as.i32 < 0,
+            .magnitude = (unsigned __int128)(value.as.i32 < 0 ? -(int64_t)value.as.i32 : (int64_t)value.as.i32),
+        };
+        return true;
+    case VALUE_U32:
+        *out = (Exact_Int){.negative = false, .magnitude = value.as.u32};
+        return true;
+    case VALUE_I64:
+        if (value.as.i64 == INT64_MIN)
+        {
+            *out = (Exact_Int){
+                .negative = true,
+                .magnitude = ((unsigned __int128)1) << 63,
+            };
+        }
+        else
+        {
+            *out = (Exact_Int){
+                .negative = value.as.i64 < 0,
+                .magnitude = (unsigned __int128)(value.as.i64 < 0 ? -value.as.i64 : value.as.i64),
+            };
+        }
+        return true;
+    case VALUE_U64:
+        *out = (Exact_Int){.negative = false, .magnitude = value.as.u64};
+        return true;
+    default:
+        return false;
+    }
+}
+
+int exact_int_compare_abs(Exact_Int a, Exact_Int b)
+{
+    if (a.magnitude < b.magnitude)
+        return -1;
+    if (a.magnitude > b.magnitude)
+        return 1;
+    return 0;
+}
+
+int exact_int_compare(Exact_Int a, Exact_Int b)
+{
+    if (a.negative != b.negative)
+        return a.negative ? -1 : 1;
+
+    int cmp = exact_int_compare_abs(a, b);
+    return a.negative ? -cmp : cmp;
+}
+
+Exact_Int exact_int_neg(Exact_Int value)
+{
+    if (value.magnitude != 0)
+        value.negative = !value.negative;
+    return value;
+}
+
+Exact_Int exact_int_add(Exact_Int a, Exact_Int b)
+{
+    if (a.negative == b.negative)
+    {
+        return (Exact_Int){
+            .negative = a.negative,
+            .magnitude = a.magnitude + b.magnitude,
+        };
+    }
+
+    int cmp = exact_int_compare_abs(a, b);
+    if (cmp == 0)
+    {
+        return (Exact_Int){0};
+    }
+
+    if (cmp > 0)
+    {
+        return (Exact_Int){
+            .negative = a.negative,
+            .magnitude = a.magnitude - b.magnitude,
+        };
+    }
+
+    return (Exact_Int){
+        .negative = b.negative,
+        .magnitude = b.magnitude - a.magnitude,
+    };
+}
+
+Exact_Int exact_int_sub(Exact_Int a, Exact_Int b)
+{
+    return exact_int_add(a, exact_int_neg(b));
+}
+
+Exact_Int exact_int_mul(Exact_Int a, Exact_Int b)
+{
+    unsigned __int128 magnitude = a.magnitude * b.magnitude;
+    return (Exact_Int){
+        .negative = magnitude != 0 && (a.negative != b.negative),
+        .magnitude = magnitude,
+    };
+}
+
+Exact_Int exact_int_div(Exact_Int a, Exact_Int b)
+{
+    unsigned __int128 magnitude = a.magnitude / b.magnitude;
+    return (Exact_Int){
+        .negative = magnitude != 0 && (a.negative != b.negative),
+        .magnitude = magnitude,
+    };
+}
+
+Exact_Int exact_int_mod(Exact_Int a, Exact_Int b)
+{
+    unsigned __int128 magnitude = a.magnitude % b.magnitude;
+    return (Exact_Int){
+        .negative = magnitude != 0 && a.negative,
+        .magnitude = magnitude,
+    };
+}
+
+bool exact_int_fits_in_type(Exact_Int value, Value_Type type)
+{
+    switch (type)
+    {
+    case VALUE_U8:
+        return !value.negative && value.magnitude <= UINT8_MAX;
+    case VALUE_I8:
+        return value.negative ? value.magnitude <= 128 : value.magnitude <= INT8_MAX;
+    case VALUE_I16:
+        return value.negative ? value.magnitude <= 32768 : value.magnitude <= INT16_MAX;
+    case VALUE_U16:
+        return !value.negative && value.magnitude <= UINT16_MAX;
+    case VALUE_I32:
+        return value.negative ? value.magnitude <= 2147483648ULL : value.magnitude <= INT32_MAX;
+    case VALUE_U32:
+        return !value.negative && value.magnitude <= UINT32_MAX;
+    case VALUE_I64:
+        return value.negative ? value.magnitude <= ((((unsigned __int128)1) << 63)) : value.magnitude <= INT64_MAX;
+    case VALUE_U64:
+        return !value.negative && value.magnitude <= UINT64_MAX;
+    default:
+        return false;
+    }
+}
+
+unsigned __int128 exact_int_to_twos_complement_bits(Exact_Int value, int bits)
+{
+    unsigned __int128 mask = exact_uint_mask(bits);
+    unsigned __int128 magnitude = value.magnitude & mask;
+
+    if (!value.negative)
+        return magnitude;
+
+    return ((((unsigned __int128)1) << bits) - magnitude) & mask;
+}
+
+int64_t exact_int_to_i64_lossless(Exact_Int value)
+{
+    if (!value.negative)
+        return (int64_t)(uint64_t)value.magnitude;
+
+    if (value.magnitude == ((((unsigned __int128)1) << 63)))
+        return INT64_MIN;
+
+    return -(int64_t)(uint64_t)value.magnitude;
+}
+
+bool exact_int_find_type(Exact_Int value, int min_bits, const Value_Type *candidates, size_t candidate_count, Value_Type *out)
+{
+    for (size_t i = 0; i < candidate_count; i++)
+    {
+        if (value_integer_bits(candidates[i]) < min_bits)
+            continue;
+        if (!exact_int_fits_in_type(value, candidates[i]))
+            continue;
+
+        *out = candidates[i];
+        return true;
+    }
+
+    return false;
+}
+
+Value_Type value_integer_static_result_type(Value_Type a, Value_Type b)
+{
+    return value_integer_bits(a) >= value_integer_bits(b) ? a : b;
+}
+
+Value_Type value_integer_result_type(Value a, Value b, Exact_Int result)
+{
+    static const Value_Type signed_candidates[] = {
+        VALUE_I8, VALUE_I16, VALUE_I32, VALUE_I64,
+    };
+    static const Value_Type unsigned_candidates[] = {
+        VALUE_U8, VALUE_U16, VALUE_U32, VALUE_U64,
+    };
+    static const Value_Type mixed_candidates[] = {
+        VALUE_I8, VALUE_U8, VALUE_I16, VALUE_U16, VALUE_I32, VALUE_U32, VALUE_I64, VALUE_U64,
+    };
+
+    int min_bits = value_integer_bits(a.type);
+    if (value_integer_bits(b.type) > min_bits)
+        min_bits = value_integer_bits(b.type);
+
+    bool signed_a = value_type_is_signed_integer(a.type);
+    bool signed_b = value_type_is_signed_integer(b.type);
+
+    if (signed_a == signed_b)
+    {
+        Value_Type same_type = value_integer_static_result_type(a.type, b.type);
+        if (exact_int_fits_in_type(result, same_type))
+            return same_type;
+
+        if (signed_a && exact_int_find_type(result, min_bits, signed_candidates, NOB_ARRAY_LEN(signed_candidates), &same_type))
+            return same_type;
+        if (!signed_a && exact_int_find_type(result, min_bits, unsigned_candidates, NOB_ARRAY_LEN(unsigned_candidates), &same_type))
+            return same_type;
+    }
+
+    Value_Type result_type = result.negative ? VALUE_I64 : VALUE_U64;
+    if (exact_int_find_type(result, min_bits, mixed_candidates, NOB_ARRAY_LEN(mixed_candidates), &result_type))
+        return result_type;
+
+    return result.negative ? VALUE_I64 : VALUE_U64;
+}
+
+Value value_from_exact_int_for_type(Value_Type type, Exact_Int value)
+{
+    switch (type)
+    {
+    case VALUE_U8:
+        return value_u8((uint8_t)exact_int_to_twos_complement_bits(value, 8));
+    case VALUE_I8:
+    {
+        uint8_t raw = (uint8_t)exact_int_to_twos_complement_bits(value, 8);
+        int8_t num = 0;
+        memcpy(&num, &raw, sizeof(num));
+        return value_i8(num);
+    }
+    case VALUE_I16:
+    {
+        uint16_t raw = (uint16_t)exact_int_to_twos_complement_bits(value, 16);
+        int16_t num = 0;
+        memcpy(&num, &raw, sizeof(num));
+        return value_i16(num);
+    }
+    case VALUE_U16:
+        return value_u16((uint16_t)exact_int_to_twos_complement_bits(value, 16));
+    case VALUE_I32:
+    {
+        uint32_t raw = (uint32_t)exact_int_to_twos_complement_bits(value, 32);
+        int32_t num = 0;
+        memcpy(&num, &raw, sizeof(num));
+        return value_i32(num);
+    }
+    case VALUE_U32:
+        return value_u32((uint32_t)exact_int_to_twos_complement_bits(value, 32));
+    case VALUE_I64:
+    {
+        uint64_t raw = (uint64_t)exact_int_to_twos_complement_bits(value, 64);
+        int64_t num = 0;
+        memcpy(&num, &raw, sizeof(num));
+        return value_i64(num);
+    }
+    case VALUE_U64:
+        return value_u64((uint64_t)exact_int_to_twos_complement_bits(value, 64));
+    default:
+        return value_i64(exact_int_to_i64_lossless(value));
+    }
 }
 
 bool value_require_numeric(Value value, const char *op_name)
@@ -773,6 +1257,34 @@ bool parse_i64(const char *input, int64_t *out)
     return true;
 }
 
+bool parse_i8(const char *input, int8_t *out)
+{
+    int64_t value = 0;
+
+    if (!parse_i64(input, &value))
+        return false;
+
+    if (value < INT8_MIN || value > INT8_MAX)
+        return false;
+
+    *out = (int8_t)value;
+    return true;
+}
+
+bool parse_i16(const char *input, int16_t *out)
+{
+    int64_t value = 0;
+
+    if (!parse_i64(input, &value))
+        return false;
+
+    if (value < INT16_MIN || value > INT16_MAX)
+        return false;
+
+    *out = (int16_t)value;
+    return true;
+}
+
 bool parse_i32(const char *input, int32_t *out)
 {
     int64_t value = 0;
@@ -787,11 +1299,19 @@ bool parse_i32(const char *input, int32_t *out)
     return true;
 }
 
-bool parse_u8(const char *input, uint8_t *out)
+bool parse_u64(const char *input, uint64_t *out)
 {
+    while (*input != '\0' && isspace((unsigned char)*input))
+    {
+        input++;
+    }
+
+    if (*input == '-')
+        return false;
+
     char *end = NULL;
     errno = 0;
-    unsigned long value = strtoul(input, &end, 10);
+    unsigned long long value = strtoull(input, &end, 10);
 
     if (input == end || errno == ERANGE)
         return false;
@@ -801,10 +1321,43 @@ bool parse_u8(const char *input, uint8_t *out)
         end++;
     }
 
-    if (*end != '\0' || value > UINT8_MAX)
+    if (*end != '\0')
+        return false;
+
+    *out = (uint64_t)value;
+    return true;
+}
+
+bool parse_u8(const char *input, uint8_t *out)
+{
+    uint64_t value = 0;
+
+    if (!parse_u64(input, &value) || value > UINT8_MAX)
         return false;
 
     *out = (uint8_t)value;
+    return true;
+}
+
+bool parse_u16(const char *input, uint16_t *out)
+{
+    uint64_t value = 0;
+
+    if (!parse_u64(input, &value) || value > UINT16_MAX)
+        return false;
+
+    *out = (uint16_t)value;
+    return true;
+}
+
+bool parse_u32(const char *input, uint32_t *out)
+{
+    uint64_t value = 0;
+
+    if (!parse_u64(input, &value) || value > UINT32_MAX)
+        return false;
+
+    *out = (uint32_t)value;
     return true;
 }
 
@@ -883,6 +1436,30 @@ bool parse_typed_value(Value_Type type, const char *input, Value *out)
         *out = value_u8(value);
         return true;
     }
+    case VALUE_I8:
+    {
+        int8_t value = 0;
+        if (!parse_i8(input, &value))
+            return false;
+        *out = value_i8(value);
+        return true;
+    }
+    case VALUE_I16:
+    {
+        int16_t value = 0;
+        if (!parse_i16(input, &value))
+            return false;
+        *out = value_i16(value);
+        return true;
+    }
+    case VALUE_U16:
+    {
+        uint16_t value = 0;
+        if (!parse_u16(input, &value))
+            return false;
+        *out = value_u16(value);
+        return true;
+    }
     case VALUE_I32:
     {
         int32_t value = 0;
@@ -891,12 +1468,28 @@ bool parse_typed_value(Value_Type type, const char *input, Value *out)
         *out = value_i32(value);
         return true;
     }
+    case VALUE_U32:
+    {
+        uint32_t value = 0;
+        if (!parse_u32(input, &value))
+            return false;
+        *out = value_u32(value);
+        return true;
+    }
     case VALUE_I64:
     {
         int64_t value = 0;
         if (!parse_i64(input, &value))
             return false;
         *out = value_i64(value);
+        return true;
+    }
+    case VALUE_U64:
+    {
+        uint64_t value = 0;
+        if (!parse_u64(input, &value))
+            return false;
+        *out = value_u64(value);
         return true;
     }
     case VALUE_F32:
@@ -927,11 +1520,28 @@ bool value_try_as_i64(Value value, int64_t *out)
     case VALUE_U8:
         *out = value.as.u8;
         return true;
+    case VALUE_I8:
+        *out = value.as.i8;
+        return true;
+    case VALUE_I16:
+        *out = value.as.i16;
+        return true;
+    case VALUE_U16:
+        *out = value.as.u16;
+        return true;
     case VALUE_I32:
         *out = value.as.i32;
         return true;
+    case VALUE_U32:
+        *out = value.as.u32;
+        return true;
     case VALUE_I64:
         *out = value.as.i64;
+        return true;
+    case VALUE_U64:
+        if (value.as.u64 > INT64_MAX)
+            return false;
+        *out = (int64_t)value.as.u64;
         return true;
     default:
         return false;
@@ -951,10 +1561,20 @@ double value_as_f64(Value value)
     {
     case VALUE_U8:
         return (double)value.as.u8;
+    case VALUE_I8:
+        return (double)value.as.i8;
+    case VALUE_I16:
+        return (double)value.as.i16;
+    case VALUE_U16:
+        return (double)value.as.u16;
     case VALUE_I32:
         return (double)value.as.i32;
+    case VALUE_U32:
+        return (double)value.as.u32;
     case VALUE_I64:
         return (double)value.as.i64;
+    case VALUE_U64:
+        return (double)value.as.u64;
     case VALUE_F32:
         return (double)value.as.f32;
     case VALUE_F64:
@@ -970,10 +1590,20 @@ bool value_is_zero(Value value)
     {
     case VALUE_U8:
         return value.as.u8 == 0;
+    case VALUE_I8:
+        return value.as.i8 == 0;
+    case VALUE_I16:
+        return value.as.i16 == 0;
+    case VALUE_U16:
+        return value.as.u16 == 0;
     case VALUE_I32:
         return value.as.i32 == 0;
+    case VALUE_U32:
+        return value.as.u32 == 0;
     case VALUE_I64:
         return value.as.i64 == 0;
+    case VALUE_U64:
+        return value.as.u64 == 0;
     case VALUE_F32:
         return value.as.f32 == 0.0f;
     case VALUE_F64:
@@ -1586,9 +2216,9 @@ bool parse_struct_line(String_View input, Struct_Defs *defs, Struct_Def *out)
     return true;
 }
 
-bool memory_ensure(Memory *memory, int64_t addr)
+bool memory_ensure(Memory *memory, uint64_t addr)
 {
-    if (addr < 0)
+    if (addr > SIZE_MAX)
     {
         ERR("Memory address out of range\n");
         return false;
@@ -1691,9 +2321,7 @@ Value_Type value_binary_result_type(Value a, Value b)
         return rank_a > rank_b ? a.type : b.type;
     }
 
-    int rank_a = value_integer_rank(a.type);
-    int rank_b = value_integer_rank(b.type);
-    return rank_a > rank_b ? a.type : b.type;
+    return value_integer_static_result_type(a.type, b.type);
 }
 
 Value value_from_i64_for_type(Value_Type type, int64_t value)
@@ -1702,10 +2330,20 @@ Value value_from_i64_for_type(Value_Type type, int64_t value)
     {
     case VALUE_U8:
         return value_u8((uint8_t)value);
+    case VALUE_I8:
+        return value_i8((int8_t)value);
+    case VALUE_I16:
+        return value_i16((int16_t)value);
+    case VALUE_U16:
+        return value_u16((uint16_t)value);
     case VALUE_I32:
         return value_i32((int32_t)value);
+    case VALUE_U32:
+        return value_u32((uint32_t)value);
     case VALUE_I64:
         return value_i64(value);
+    case VALUE_U64:
+        return value_u64((uint64_t)value);
     default:
         return value_i64(value);
     }
@@ -1731,38 +2369,53 @@ bool value_has_float(Value a, Value b)
 
 Value value_add(Value a, Value b)
 {
-    Value_Type result_type = value_binary_result_type(a, b);
-
-    if (value_type_is_float(result_type))
+    if (value_has_float(a, b))
     {
+        Value_Type result_type = value_binary_result_type(a, b);
         return value_from_f64_for_type(result_type, value_as_f64(a) + value_as_f64(b));
     }
 
-    return value_from_i64_for_type(result_type, value_as_i64(a) + value_as_i64(b));
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    Exact_Int result = exact_int_add(lhs, rhs);
+    Value_Type result_type = value_integer_result_type(a, b, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 Value value_sub(Value a, Value b)
 {
-    Value_Type result_type = value_binary_result_type(a, b);
-
-    if (value_type_is_float(result_type))
+    if (value_has_float(a, b))
     {
+        Value_Type result_type = value_binary_result_type(a, b);
         return value_from_f64_for_type(result_type, value_as_f64(a) - value_as_f64(b));
     }
 
-    return value_from_i64_for_type(result_type, value_as_i64(a) - value_as_i64(b));
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    Exact_Int result = exact_int_sub(lhs, rhs);
+    Value_Type result_type = value_integer_result_type(a, b, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 Value value_mul(Value a, Value b)
 {
-    Value_Type result_type = value_binary_result_type(a, b);
-
-    if (value_type_is_float(result_type))
+    if (value_has_float(a, b))
     {
+        Value_Type result_type = value_binary_result_type(a, b);
         return value_from_f64_for_type(result_type, value_as_f64(a) * value_as_f64(b));
     }
 
-    return value_from_i64_for_type(result_type, value_as_i64(a) * value_as_i64(b));
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    Exact_Int result = exact_int_mul(lhs, rhs);
+    Value_Type result_type = value_integer_result_type(a, b, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 Value value_div(Value a, Value b)
@@ -1773,16 +2426,20 @@ Value value_div(Value a, Value b)
         return value_from_f64_for_type(result_type, value_as_f64(a) / value_as_f64(b));
     }
 
-    Value_Type result_type = value_binary_result_type(a, b);
-    return value_from_i64_for_type(result_type, value_as_i64(a) / value_as_i64(b));
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    Exact_Int result = exact_int_div(lhs, rhs);
+    Value_Type result_type = value_integer_result_type(a, b, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 Value value_mod(Value a, Value b)
 {
-    Value_Type result_type = value_binary_result_type(a, b);
-
-    if (value_type_is_float(result_type))
+    if (value_has_float(a, b))
     {
+        Value_Type result_type = value_binary_result_type(a, b);
         double lhs = value_as_f64(a);
         double rhs = value_as_f64(b);
         double quotient = lhs / rhs;
@@ -1790,15 +2447,20 @@ Value value_mod(Value a, Value b)
         return value_from_f64_for_type(result_type, lhs - (truncated * rhs));
     }
 
-    return value_from_i64_for_type(result_type, value_as_i64(a) % value_as_i64(b));
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    Exact_Int result = exact_int_mod(lhs, rhs);
+    Value_Type result_type = value_integer_result_type(a, b, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 Value value_exp(Value base, Value exponent)
 {
-    Value_Type result_type = value_binary_result_type(base, exponent);
-
-    if (value_type_is_float(result_type))
+    if (value_has_float(base, exponent))
     {
+        Value_Type result_type = value_binary_result_type(base, exponent);
         int64_t steps = (int64_t)value_as_f64(exponent);
         double result = 1.0;
         double factor = value_as_f64(base);
@@ -1811,16 +2473,25 @@ Value value_exp(Value base, Value exponent)
         return value_from_f64_for_type(result_type, result);
     }
 
-    int64_t steps = value_as_i64(exponent);
-    int64_t result = 1;
-    int64_t factor = value_as_i64(base);
+    Exact_Int factor = {0};
+    Exact_Int steps = {0};
+    Exact_Int result = {
+        .negative = false,
+        .magnitude = 1,
+    };
+    (void)exact_int_from_value(base, &factor);
+    (void)exact_int_from_value(exponent, &steps);
 
-    for (int64_t i = 0; i < steps; i++)
+    if (steps.negative)
+        return value_from_exact_int_for_type(value_integer_result_type(base, exponent, result), result);
+
+    for (uint64_t i = 0; i < (uint64_t)steps.magnitude; i++)
     {
-        result *= factor;
+        result = exact_int_mul(result, factor);
     }
 
-    return value_from_i64_for_type(result_type, result);
+    Value_Type result_type = value_integer_result_type(base, exponent, result);
+    return value_from_exact_int_for_type(result_type, result);
 }
 
 int value_compare(Value a, Value b)
@@ -1837,14 +2508,11 @@ int value_compare(Value a, Value b)
         return 0;
     }
 
-    int64_t lhs = value_as_i64(a);
-    int64_t rhs = value_as_i64(b);
-
-    if (lhs < rhs)
-        return -1;
-    if (lhs > rhs)
-        return 1;
-    return 0;
+    Exact_Int lhs = {0};
+    Exact_Int rhs = {0};
+    (void)exact_int_from_value(a, &lhs);
+    (void)exact_int_from_value(b, &rhs);
+    return exact_int_compare(lhs, rhs);
 }
 
 bool value_equal(Value a, Value b)
@@ -1872,19 +2540,81 @@ bool value_convert_scalar(Value src, Value_Type dst_type, Value *out)
         if (value_type_is_float(src.type))
             *out = value_u8((uint8_t)value_as_f64(src));
         else
-            *out = value_u8((uint8_t)value_as_i64(src));
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
+        return true;
+    case VALUE_I8:
+        if (value_type_is_float(src.type))
+            *out = value_i8((int8_t)value_as_f64(src));
+        else
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
+        return true;
+    case VALUE_I16:
+        if (value_type_is_float(src.type))
+            *out = value_i16((int16_t)value_as_f64(src));
+        else
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
+        return true;
+    case VALUE_U16:
+        if (value_type_is_float(src.type))
+            *out = value_u16((uint16_t)value_as_f64(src));
+        else
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
         return true;
     case VALUE_I32:
         if (value_type_is_float(src.type))
             *out = value_i32((int32_t)value_as_f64(src));
         else
-            *out = value_i32((int32_t)value_as_i64(src));
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
+        return true;
+    case VALUE_U32:
+        if (value_type_is_float(src.type))
+            *out = value_u32((uint32_t)value_as_f64(src));
+        else
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
         return true;
     case VALUE_I64:
         if (value_type_is_float(src.type))
             *out = value_i64((int64_t)value_as_f64(src));
         else
-            *out = value_i64((int64_t)value_as_i64(src));
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
+        return true;
+    case VALUE_U64:
+        if (value_type_is_float(src.type))
+            *out = value_u64((uint64_t)value_as_f64(src));
+        else
+        {
+            Exact_Int exact = {0};
+            (void)exact_int_from_value(src, &exact);
+            *out = value_from_exact_int_for_type(dst_type, exact);
+        }
         return true;
     case VALUE_F32:
         *out = value_f32((float)value_as_f64(src));
@@ -1907,17 +2637,47 @@ Value struct_field_value_from_bytes(Struct_Field field, const uint8_t *data)
         memcpy(&value, data + field.offset, sizeof(value));
         return value_u8(value);
     }
+    case FIELD_I8:
+    {
+        int8_t value = 0;
+        memcpy(&value, data + field.offset, sizeof(value));
+        return value_i8(value);
+    }
+    case FIELD_I16:
+    {
+        int16_t value = 0;
+        memcpy(&value, data + field.offset, sizeof(value));
+        return value_i16(value);
+    }
+    case FIELD_U16:
+    {
+        uint16_t value = 0;
+        memcpy(&value, data + field.offset, sizeof(value));
+        return value_u16(value);
+    }
     case FIELD_I32:
     {
         int32_t value = 0;
         memcpy(&value, data + field.offset, sizeof(value));
         return value_i32(value);
     }
+    case FIELD_U32:
+    {
+        uint32_t value = 0;
+        memcpy(&value, data + field.offset, sizeof(value));
+        return value_u32(value);
+    }
     case FIELD_I64:
     {
         int64_t value = 0;
         memcpy(&value, data + field.offset, sizeof(value));
         return value_i64(value);
+    }
+    case FIELD_U64:
+    {
+        uint64_t value = 0;
+        memcpy(&value, data + field.offset, sizeof(value));
+        return value_u64(value);
     }
     case FIELD_F32:
     {
@@ -1961,11 +2721,26 @@ bool struct_field_store_bytes(Struct_Field field, uint8_t *data, Value value)
     case FIELD_U8:
         memcpy(data + field.offset, &value.as.u8, sizeof(value.as.u8));
         return true;
+    case FIELD_I8:
+        memcpy(data + field.offset, &value.as.i8, sizeof(value.as.i8));
+        return true;
+    case FIELD_I16:
+        memcpy(data + field.offset, &value.as.i16, sizeof(value.as.i16));
+        return true;
+    case FIELD_U16:
+        memcpy(data + field.offset, &value.as.u16, sizeof(value.as.u16));
+        return true;
     case FIELD_I32:
         memcpy(data + field.offset, &value.as.i32, sizeof(value.as.i32));
         return true;
+    case FIELD_U32:
+        memcpy(data + field.offset, &value.as.u32, sizeof(value.as.u32));
+        return true;
     case FIELD_I64:
         memcpy(data + field.offset, &value.as.i64, sizeof(value.as.i64));
+        return true;
+    case FIELD_U64:
+        memcpy(data + field.offset, &value.as.u64, sizeof(value.as.u64));
         return true;
     case FIELD_F32:
         memcpy(data + field.offset, &value.as.f32, sizeof(value.as.f32));
@@ -2010,11 +2785,26 @@ void value_print(Value value)
     case VALUE_U8:
         printf("%u", value.as.u8);
         break;
+    case VALUE_I8:
+        printf("%d", value.as.i8);
+        break;
+    case VALUE_I16:
+        printf("%d", value.as.i16);
+        break;
+    case VALUE_U16:
+        printf("%u", value.as.u16);
+        break;
     case VALUE_I32:
         printf("%d", value.as.i32);
         break;
+    case VALUE_U32:
+        printf("%u", value.as.u32);
+        break;
     case VALUE_I64:
-        printf("%lld", (long long)value.as.i64);
+        printf("%" PRId64, value.as.i64);
+        break;
+    case VALUE_U64:
+        printf("%" PRIu64, value.as.u64);
         break;
     case VALUE_F32:
         value_print_float((double)value.as.f32, "%.9g");
@@ -2072,7 +2862,9 @@ unsigned char value_to_char(Value value)
     if (value_type_is_float(value.type))
         return (unsigned char)value_as_f64(value);
 
-    return (unsigned char)value_as_i64(value);
+    Exact_Int exact = {0};
+    (void)exact_int_from_value(value, &exact);
+    return (unsigned char)exact_int_to_twos_complement_bits(exact, 8);
 }
 
 bool value_is_text_byte(Value value)
@@ -2096,15 +2888,40 @@ bool dlcall_arg_store_scalar(Value value, Value_Type type, void **out_storage)
             return free(storage), false;
         memcpy(storage, &value.as.u8, sizeof(value.as.u8));
         break;
+    case VALUE_I8:
+        if (value.type != VALUE_I8)
+            return free(storage), false;
+        memcpy(storage, &value.as.i8, sizeof(value.as.i8));
+        break;
+    case VALUE_I16:
+        if (value.type != VALUE_I16)
+            return free(storage), false;
+        memcpy(storage, &value.as.i16, sizeof(value.as.i16));
+        break;
+    case VALUE_U16:
+        if (value.type != VALUE_U16)
+            return free(storage), false;
+        memcpy(storage, &value.as.u16, sizeof(value.as.u16));
+        break;
     case VALUE_I32:
         if (value.type != VALUE_I32)
             return free(storage), false;
         memcpy(storage, &value.as.i32, sizeof(value.as.i32));
         break;
+    case VALUE_U32:
+        if (value.type != VALUE_U32)
+            return free(storage), false;
+        memcpy(storage, &value.as.u32, sizeof(value.as.u32));
+        break;
     case VALUE_I64:
         if (value.type != VALUE_I64)
             return free(storage), false;
         memcpy(storage, &value.as.i64, sizeof(value.as.i64));
+        break;
+    case VALUE_U64:
+        if (value.type != VALUE_U64)
+            return free(storage), false;
+        memcpy(storage, &value.as.u64, sizeof(value.as.u64));
         break;
     case VALUE_F32:
         if (value.type != VALUE_F32)
@@ -2308,11 +3125,26 @@ bool vm_push_dlcall_return(Vm *vm, Dlcall_Type ret_type, void *storage)
         case VALUE_U8:
             vm_push(vm, value_u8(*(uint8_t *)storage));
             return true;
+        case VALUE_I8:
+            vm_push(vm, value_i8(*(int8_t *)storage));
+            return true;
+        case VALUE_I16:
+            vm_push(vm, value_i16(*(int16_t *)storage));
+            return true;
+        case VALUE_U16:
+            vm_push(vm, value_u16(*(uint16_t *)storage));
+            return true;
         case VALUE_I32:
             vm_push(vm, value_i32(*(int32_t *)storage));
             return true;
+        case VALUE_U32:
+            vm_push(vm, value_u32(*(uint32_t *)storage));
+            return true;
         case VALUE_I64:
             vm_push(vm, value_i64(*(int64_t *)storage));
+            return true;
+        case VALUE_U64:
+            vm_push(vm, value_u64(*(uint64_t *)storage));
             return true;
         case VALUE_F32:
             vm_push(vm, value_f32(*(float *)storage));
@@ -2705,8 +3537,24 @@ bool vm_neg(Vm *vm)
         return true;
     }
 
-    vm_push(vm, value_from_i64_for_type(value.type, -value_as_i64(value)));
+    Exact_Int exact = {0};
+    (void)exact_int_from_value(value, &exact);
+    Exact_Int result = exact_int_neg(exact);
+    Value_Type result_type = value_integer_result_type(value, value, result);
+    vm_push(vm, value_from_exact_int_for_type(result_type, result));
     value_free(&value);
+    return true;
+}
+
+bool value_try_as_memory_address(Value value, uint64_t *out)
+{
+    if (value.type != VALUE_U64)
+    {
+        ERR("Memory address must be u64\n");
+        return false;
+    }
+
+    *out = value.as.u64;
     return true;
 }
 
@@ -2915,21 +3763,21 @@ void vm_rot(Vm *vm)
 bool vm_read(Vm *vm, Memory *memory)
 {
     Value addr_value = vm_pop(vm);
-    size_t addr = 0;
+    uint64_t addr = 0;
 
-    if (!value_try_as_index(addr_value, &addr, "Memory address"))
+    if (!value_try_as_memory_address(addr_value, &addr))
     {
         value_free(&addr_value);
         return false;
     }
 
-    if (!memory_ensure(memory, (int64_t)addr))
+    if (!memory_ensure(memory, addr))
     {
         value_free(&addr_value);
         return false;
     }
 
-    vm_push(vm, memory_get(memory, addr));
+    vm_push(vm, memory_get(memory, (size_t)addr));
     value_free(&addr_value);
     return true;
 }
@@ -2938,23 +3786,23 @@ bool vm_write(Vm *vm, Memory *memory)
 {
     Value addr_value = vm_pop(vm);
     Value value = vm_pop(vm);
-    size_t addr = 0;
+    uint64_t addr = 0;
 
-    if (!value_try_as_index(addr_value, &addr, "Memory address"))
+    if (!value_try_as_memory_address(addr_value, &addr))
     {
         value_free(&addr_value);
         value_free(&value);
         return false;
     }
 
-    if (!memory_ensure(memory, (int64_t)addr))
+    if (!memory_ensure(memory, addr))
     {
         value_free(&addr_value);
         value_free(&value);
         return false;
     }
 
-    memory_set(memory, addr, value);
+    memory_set(memory, (size_t)addr, value);
     value_free(&addr_value);
     value_free(&value);
     return true;
@@ -3385,17 +4233,7 @@ bool parse_const_line(String_View input, String_View *name, Value *value)
     Value_Type type = VALUE_I64;
     bool has_explicit_type = true;
 
-    if (sv_eq_ignore_case(first, "u8"))
-        type = VALUE_U8;
-    else if (sv_eq_ignore_case(first, "i32"))
-        type = VALUE_I32;
-    else if (sv_eq_ignore_case(first, "i64"))
-        type = VALUE_I64;
-    else if (sv_eq_ignore_case(first, "f32"))
-        type = VALUE_F32;
-    else if (sv_eq_ignore_case(first, "f64"))
-        type = VALUE_F64;
-    else
+    if (!parse_scalar_value_type(first, &type))
         has_explicit_type = false;
 
     if (!has_explicit_type)
@@ -3483,11 +4321,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
             return 1;
         }
     }
-    else if (sv_eq_ignore_case(command, "u8") ||
-             sv_eq_ignore_case(command, "i32") ||
-             sv_eq_ignore_case(command, "i64") ||
-             sv_eq_ignore_case(command, "f32") ||
-             sv_eq_ignore_case(command, "f64"))
+    else if (parse_scalar_value_type(command, &(Value_Type){0}))
     {
         if (line.count == 0)
         {
@@ -3496,17 +4330,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
         }
 
         Value_Type type = VALUE_I64;
-
-        if (sv_eq_ignore_case(command, "u8"))
-            type = VALUE_U8;
-        else if (sv_eq_ignore_case(command, "i32"))
-            type = VALUE_I32;
-        else if (sv_eq_ignore_case(command, "i64"))
-            type = VALUE_I64;
-        else if (sv_eq_ignore_case(command, "f32"))
-            type = VALUE_F32;
-        else if (sv_eq_ignore_case(command, "f64"))
-            type = VALUE_F64;
+        (void)parse_scalar_value_type(command, &type);
 
         Value value = value_i64(0);
 
@@ -3547,7 +4371,7 @@ int exec_line(Vm *vm, Memory *memory, Consts *consts, Struct_Defs *struct_defs, 
 
         if (!parse_scalar_value_type(line, &target_type))
         {
-            ERR("convert only supports scalar target types: u8, i32, i64, f32, f64\n");
+            ERR("convert only supports scalar target types: u8, i8, i16, u16, i32, u32, i64, u64, f32, f64\n");
             return 1;
         }
 

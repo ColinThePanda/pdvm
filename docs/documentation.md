@@ -6,7 +6,7 @@
 
 Core traits:
 
-- Typed scalar values: `u8`, `i32`, `i64`, `f32`, `f64`
+- Typed scalar values: `u8`, `i8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`
 - Opaque pointer values: `ptr`
 - Packed struct values with C-like alignment rules
 - Byte-backed memory storing full typed values
@@ -93,8 +93,13 @@ Built-in host definitions:
 ### Scalar value types
 
 - `u8`
+- `i8`
+- `i16`
+- `u16`
 - `i32`
+- `u32`
 - `i64`
+- `u64`
 - `f32`
 - `f64`
 
@@ -159,8 +164,13 @@ push SOME_CONST
 
 ```pdvm
 u8 255
+i8 -12
+i16 -32000
+u16 65000
 i32 123
+u32 4000000000
 i64 9000
+u64 18446744073709551615
 f32 1.5
 f64 1.5
 ```
@@ -174,9 +184,13 @@ In files:
 
 ```pdvm
 const LIMIT 64
+const i16 OFFSET -12
+const u16 MASK 65535
 const i32 WIDTH 800
+const u32 FLAGS 4000000000
 const f32 SPEED 2.5
 const u8 ALPHA 255
+const u64 BIG 18446744073709551615
 ```
 
 In the console, `const` is also available interactively.
@@ -193,12 +207,17 @@ Mixed arithmetic widens values with these rules:
 
 0. If either operand is a float, the result is floating-point
 0. Between floats, the higher float precision wins
-0. Between integers, the higher integer capacity wins
+0. Between integers, `pdvm` keeps at least the widest operand width and then picks a scalar type that can exactly hold the integer result
+0. When possible, same-signed operations stay in the same signedness family
+0. Mixed signed and unsigned operations may resolve to either a signed or unsigned type depending on the exact result
 
 Examples:
 
 - `u8 + i32 -> i32`
 - `i32 + i64 -> i64`
+- `u8(255) + u8(1) -> u16(256)`
+- `u64(2) + i64(-3) -> i64(-1)`
+- `u64(18446744073709551615) + i64(-1) -> u64(18446744073709551614)`
 - `f32 + f64 -> f64`
 - `i32 + f64 -> f64`
 
@@ -227,8 +246,13 @@ struct Rectangle f32 f32 f32 f32
 Supported field types:
 
 - `u8`
+- `i8`
+- `i16`
+- `u16`
 - `i32`
+- `u32`
 - `i64`
+- `u64`
 - `f32`
 - `f64`
 - `ptr`
@@ -281,7 +305,7 @@ set Color 2
 
 ## Memory
 
-`pdvm` memory is addressed with non-negative integer addresses. Each address stores one full typed value, not just raw bytes.
+`pdvm` memory is addressed with `u64` addresses. Each address stores one full typed value, not just raw bytes.
 
 Commands:
 
@@ -292,17 +316,18 @@ Usage:
 
 ```pdvm
 push 123
-push 0
+u64 0
 write
 
-push 0
+u64 0
 read
 print
 ```
 
 Rules:
 
-- Address values must be integer-like and non-negative
+- Address values for `read` and `write` must be `u64`
+- `push 0` produces `i64(0)`, so memory addresses should be created with `u64 ...`, a `u64` constant, or `convert u64`
 - Memory auto-expands as needed
 - Reading a struct returns a cloned struct value
 - Writing a struct stores a cloned struct value
@@ -418,8 +443,13 @@ convert u8
 - Pops the top numeric scalar
 - Converts it to one of:
   - `u8`
+  - `i8`
+  - `i16`
+  - `u16`
   - `i32`
+  - `u32`
   - `i64`
+  - `u64`
   - `f32`
   - `f64`
 - Pushes the converted value
@@ -505,8 +535,13 @@ Supported type tokens:
 - Return:
   - `v`
   - `u8`
+  - `i8`
+  - `i16`
+  - `u16`
   - `i32`
+  - `u32`
   - `i64`
+  - `u64`
   - `f32`
   - `f64`
   - `ptr`
@@ -514,8 +549,13 @@ Supported type tokens:
   - any defined struct name
 - Arguments:
   - `u8`
+  - `i8`
+  - `i16`
+  - `u16`
   - `i32`
+  - `u32`
   - `i64`
+  - `u64`
   - `f32`
   - `f64`
   - `ptr`
