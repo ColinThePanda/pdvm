@@ -36,21 +36,21 @@ label _main
     dlcall raylib.SetTargetFPS v i32
 
     f32 0.0
-    i64 0
+    u64 0
     write
 
 label loop
     dlcall raylib.WindowShouldClose i32
     jnz done
 
-    i64 0
+    u64 0
     read
     f32 120.0
     dlcall raylib.GetFrameTime f32
     mul
     add
     dup
-    i64 0
+    u64 0
     write
 
     dlcall raylib.BeginDrawing v
@@ -68,11 +68,11 @@ label loop
     i32 2
     div
 
-    i64 1
+    u64 1
     write
 
     pushs Raylib Test
-    i64 1
+    u64 1
     read
     i32 40
     i32 40
@@ -89,7 +89,7 @@ label loop
     f32 100.0
     pack Vector2
 
-    i64 0
+    u64 0
     read
 
     call color_cornflower

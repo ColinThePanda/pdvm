@@ -1,23 +1,23 @@
 label _main
 input
-push 0
+u64 0
 write
 
 input
-push 1
+u64 1
 write
 
 label loop
-push 0
+u64 0
 read
-push 1
+u64 1
 read
 sub
 jz done
 
-push 0
+u64 0
 read
-push 1
+u64 1
 read
 sub
 jpos a_bigger
@@ -25,27 +25,27 @@ jpos a_bigger
 jmp b_bigger
 
 label a_bigger
-push 0
+u64 0
 read
-push 1
+u64 1
 read
 sub
-push 0
+u64 0
 write
 jmp loop
 
 label b_bigger
-push 1
+u64 1
 read
-push 0
+u64 0
 read
 sub
-push 1
+u64 1
 write
 jmp loop
 
 label done
-push 0
+u64 0
 read
 print
 halt
